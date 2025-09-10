@@ -1,176 +1,127 @@
 from collections.abc import Callable
 from enum import Enum
-from typing import (
-    Any,
-    Generic,
-    Literal,
-    TypeAlias,
-    TypeVar,
-)
+from typing import Any, Generic, Literal, TypeAlias, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# -----------------------------------------------------------------------------
+# JSON-RPC constants
+# -----------------------------------------------------------------------------
+
+JSONRPC_VERSION: Literal["2.0"] = "2.0"
+LATEST_PROTOCOL_VERSION: str = "2025-06-18"
+
+# -----------------------------------------------------------------------------
+# Basic types
+# -----------------------------------------------------------------------------
+
 ProgressToken = str | int
 Cursor = str
-Role = Literal["user", "assistant"]
 RequestId = str | int
 AnyFunction: TypeAlias = Callable[..., Any]
 
 
-class RequestParams(BaseModel):
-    class Meta(BaseModel):
-        progressToken: ProgressToken | None = None
-        model_config = ConfigDict(extra="allow")
-
-    meta: Meta | None = Field(alias="_meta", default=None)
-
-    model_config = ConfigDict(extra="allow")
+# -----------------------------------------------------------------------------
+# Base JSON-RPC shapes
+# -----------------------------------------------------------------------------
 
 
-class NotificationParams(BaseModel):
-    """Base notification parameters with metadata support."""
+class Request(BaseModel):
+    method: str
+    params: Any = None
 
-    class Meta(BaseModel):
-        model_config = ConfigDict(extra="allow")
-
-    meta: Meta | None = Field(alias="_meta", default=None)
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
 
-RequestParamsT = TypeVar("RequestParamsT", bound=RequestParams)
-NotificationParamsT = TypeVar("NotificationParamsT", bound=NotificationParams)
-MethodT = TypeVar("MethodT", bound=str)
+class Notification(BaseModel):
+    method: str
+    params: Any = None
 
-
-class Request(BaseModel, Generic[RequestParamsT, MethodT]):
-    method: MethodT
-    params: RequestParamsT
-    model_config = ConfigDict(extra="allow")
-
-
-class PaginatedRequest(Request[RequestParamsT, MethodT]):
-    cursor: Cursor | None = None
-    model_config = ConfigDict(extra="allow")
-
-
-class Notification(BaseModel, Generic[NotificationParamsT, MethodT]):
-    method: MethodT
-    params: NotificationParamsT
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
 
 class Result(BaseModel):
     meta: dict[str, Any] | None = Field(alias="_meta", default=None)
-    model_config = ConfigDict(extra="allow")
 
-
-# Generic JSONRPC Message types for better type safety
-T = TypeVar("T", bound=Result)
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
 
 class JSONRPCMessage(BaseModel):
-    """Base class for all JSON-RPC messages."""
+    jsonrpc: Literal["2.0"] = Field(default=JSONRPC_VERSION, frozen=True)
 
     model_config = ConfigDict(extra="allow")
-    jsonrpc: str = Field(default="2.0", frozen=True)
 
 
-class JSONRPCRequest(JSONRPCMessage):
-    """A JSON-RPC request message."""
-
-    id: str | int | None = None
-    method: str
-    params: dict[str, Any] | None = None
-
-
-class JSONRPCResponse(BaseModel, Generic[T]):
-    """Typed JSON-RPC response with result type parameter."""
-
-    jsonrpc: Literal["2.0"] = "2.0"
+class JSONRPCRequest(JSONRPCMessage, Request):
     id: RequestId
-    result: T
 
 
-class PaginatedResult(Result):
-    nextCursor: Cursor | None = None
-    model_config = ConfigDict(extra="allow")
+T = TypeVar("T", bound=Result)
 
 
-# -----------------------------
-# Additional MCP message types
-# -----------------------------
+class JSONRPCResponse(JSONRPCMessage, Generic[T]):
+    id: RequestId
+    result: T | dict[str, Any]
 
 
-# Error messages and helpers
+# Standard JSON-RPC error codes
+PARSE_ERROR = -32700
+INVALID_REQUEST = -32600
+METHOD_NOT_FOUND = -32601
+INVALID_PARAMS = -32602
+INTERNAL_ERROR = -32603
+
+
 class JSONRPCError(JSONRPCMessage):
-    """A JSON-RPC error message."""
-
-    id: str | int | None
+    id: RequestId
     error: dict[str, Any]
 
 
-class ErrorData(BaseModel):
-    code: int
-    message: str
-    data: Any | None = None
+# -----------------------------------------------------------------------------
+# Initialization
+# -----------------------------------------------------------------------------
+
+
+class BaseMetadata(BaseModel):
+    name: str
+    title: str | None = None
+
     model_config = ConfigDict(extra="allow")
 
 
-# Common responses
-class PingRequest(JSONRPCRequest):
-    method: str = Field(default="ping", frozen=True)
-    params: dict[str, Any] | None = None
-
-
-class PingResult(Result):
-    pass
-
-
-class OkResult(Result):
-    ok: bool = True
-
-
-class DictResult(Result):
-    data: dict[str, Any] = Field(default_factory=dict)
-
-
-class PingResponse(JSONRPCResponse[PingResult]):
-    result: PingResult = Field(default_factory=PingResult)
-
-
-class ShutdownRequest(JSONRPCRequest):
-    method: str = Field(default="shutdown", frozen=True)
-    params: dict[str, Any] | None = None
-
-
-class ShutdownResponse(JSONRPCResponse[OkResult]):
-    result: OkResult = Field(default_factory=OkResult)
-
-
-class CancelRequest(JSONRPCRequest):
-    method: str = Field(default="$/cancelRequest", frozen=True)
-    params: dict[str, Any]
-
-
-# Initialize
-class Implementation(BaseModel):
-    """Describes the name and version of an MCP implementation, with an optional title for UI representation."""
-
-    name: str
+class Implementation(BaseMetadata):
     version: str
-    title: str | None = None
+
+
+class ClientCapabilities(BaseModel):
+    experimental: dict[str, object] | None = None
+    roots: dict[str, Any] | None = None
+    sampling: dict[str, Any] | None = None
+    elicitation: dict[str, Any] | None = None
+
     model_config = ConfigDict(extra="allow")
 
 
 class ServerCapabilities(BaseModel):
-    """Describes the server's capabilities."""
+    experimental: dict[str, object] | None = None
+    logging: dict[str, Any] | None = None
+    completions: dict[str, Any] | None = None
+    prompts: dict[str, Any] | None = None
+    resources: dict[str, Any] | None = None
+    tools: dict[str, Any] | None = None
 
     model_config = ConfigDict(extra="allow")
-    tools: dict[str, Any] | None = None
-    resources: dict[str, Any] | None = None
-    prompts: dict[str, Any] | None = None
-    logging: dict[str, Any] | None = None
-    notifications: dict[str, Any] | None = None
+
+
+class InitializeParams(BaseModel):
+    protocolVersion: str
+    capabilities: ClientCapabilities = Field(default_factory=ClientCapabilities)
+    clientInfo: Implementation
+
+
+class InitializeRequest(JSONRPCRequest):
+    method: Literal["initialize"] = Field(default="initialize", frozen=True)
+    params: InitializeParams
 
 
 class InitializeResult(Result):
@@ -180,95 +131,314 @@ class InitializeResult(Result):
     instructions: str | None = None
 
 
-class InitializeResponse(JSONRPCResponse[InitializeResult]):
-    result: InitializeResult
+class InitializedNotification(JSONRPCMessage, Notification):
+    method: Literal["notifications/initialized"] = Field(
+        default="notifications/initialized", frozen=True
+    )
 
 
-class InitializeRequest(JSONRPCRequest):
-    method: str = Field(default="initialize", frozen=True)
+# -----------------------------------------------------------------------------
+# Ping
+# -----------------------------------------------------------------------------
+
+
+class PingRequest(JSONRPCRequest):
+    method: Literal["ping"] = Field(default="ping", frozen=True)
+
+
+# -----------------------------------------------------------------------------
+# Progress notifications
+# -----------------------------------------------------------------------------
+
+
+class ProgressNotificationParams(BaseModel):
+    progressToken: ProgressToken
+    progress: float
+    total: float | None = None
+    message: str | None = None
+
+
+class ProgressNotification(JSONRPCMessage, Notification):
+    method: Literal["notifications/progress"] = Field(default="notifications/progress", frozen=True)
+    params: ProgressNotificationParams
+
+
+# -----------------------------------------------------------------------------
+# Pagination
+# -----------------------------------------------------------------------------
+
+
+class PaginatedRequest(JSONRPCRequest):
     params: dict[str, Any] | None = None
 
 
-# Tools list and call
-class ListToolsRequest(JSONRPCRequest):
-    method: str = Field(default="tools/list", frozen=True)
-    params: dict[str, Any] | None = None
+class PaginatedResult(Result):
+    nextCursor: Cursor | None = None
+
+
+# -----------------------------------------------------------------------------
+# Annotations (used across resources, content, etc.)
+# -----------------------------------------------------------------------------
+
+Role = Literal["user", "assistant"]
+
+
+class Annotations(BaseModel):
+    audience: list[Role] | None = None
+    priority: float | None = None
+    lastModified: str | None = None
+
+    model_config = ConfigDict(extra="allow")
+
+
+# -----------------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------------
+
+
+class Resource(BaseMetadata):
+    uri: str
+    description: str | None = None
+    mimeType: str | None = None
+    annotations: Annotations | None = None
+    size: int | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+
+
+class ListResourcesRequest(PaginatedRequest):
+    method: Literal["resources/list"] = Field(default="resources/list", frozen=True)
+
+
+class ListResourcesResult(PaginatedResult):
+    resources: list[Resource] = Field(default_factory=list)
+
+
+class ListResourceTemplatesRequest(PaginatedRequest):
+    method: Literal["resources/templates/list"] = Field(
+        default="resources/templates/list", frozen=True
+    )
+
+
+class ResourceTemplate(BaseMetadata):
+    uriTemplate: str
+    description: str | None = None
+    mimeType: str | None = None
+    annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+
+
+class ListResourceTemplatesResult(PaginatedResult):
+    resourceTemplates: list[ResourceTemplate] = Field(default_factory=list)
+
+
+class ReadResourceParams(BaseModel):
+    uri: str
+
+
+class ReadResourceRequest(JSONRPCRequest):
+    method: Literal["resources/read"] = Field(default="resources/read", frozen=True)
+    params: ReadResourceParams
+
+
+class ResourceContents(BaseModel):
+    uri: str
+    mimeType: str | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+
+
+class TextResourceContents(ResourceContents):
+    text: str
+
+
+class BlobResourceContents(ResourceContents):
+    blob: str
+
+
+class ReadResourceResult(Result):
+    contents: list[TextResourceContents | BlobResourceContents]
+
+
+class ResourceListChangedNotification(JSONRPCMessage, Notification):
+    method: Literal["notifications/resources/list_changed"] = Field(
+        default="notifications/resources/list_changed", frozen=True
+    )
+
+
+class ResourceUpdatedNotificationParams(BaseModel):
+    uri: str
+
+
+class ResourceUpdatedNotification(JSONRPCMessage, Notification):
+    method: Literal["notifications/resources/updated"] = Field(
+        default="notifications/resources/updated", frozen=True
+    )
+    params: ResourceUpdatedNotificationParams
+
+
+class SubscribeParams(BaseModel):
+    uri: str
+
+
+class SubscribeRequest(JSONRPCRequest):
+    method: Literal["resources/subscribe"] = Field(default="resources/subscribe", frozen=True)
+    params: SubscribeParams
+
+
+class UnsubscribeParams(BaseModel):
+    uri: str
+
+
+class UnsubscribeRequest(JSONRPCRequest):
+    method: Literal["resources/unsubscribe"] = Field(default="resources/unsubscribe", frozen=True)
+    params: UnsubscribeParams
+
+
+# -----------------------------------------------------------------------------
+# Prompts
+# -----------------------------------------------------------------------------
+
+
+class PromptArgument(BaseMetadata):
+    description: str | None = None
+    required: bool | None = None
+
+
+class Prompt(BaseMetadata):
+    description: str | None = None
+    arguments: list[PromptArgument] | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+
+
+class ListPromptsRequest(PaginatedRequest):
+    method: Literal["prompts/list"] = Field(default="prompts/list", frozen=True)
+
+
+class ListPromptsResult(PaginatedResult):
+    prompts: list[Prompt] = Field(default_factory=list)
+
+
+class PromptMessage(BaseModel):
+    role: Role
+    content: dict[str, Any]
+
+
+class GetPromptParams(BaseModel):
+    name: str
+    arguments: dict[str, str] | None = None
+
+
+class GetPromptRequest(JSONRPCRequest):
+    method: Literal["prompts/get"] = Field(default="prompts/get", frozen=True)
+    params: GetPromptParams
+
+
+class GetPromptResult(Result):
+    description: str | None = None
+    messages: list[PromptMessage]
+
+
+class PromptListChangedNotification(JSONRPCMessage, Notification):
+    method: Literal["notifications/prompts/list_changed"] = Field(
+        default="notifications/prompts/list_changed", frozen=True
+    )
+
+
+# -----------------------------------------------------------------------------
+# Tools
+# -----------------------------------------------------------------------------
 
 
 class ToolAnnotations(BaseModel):
-    """
-    Represents tool annotations for hints about behavior.
-    """
-
     title: str | None = None
     readOnlyHint: bool | None = None
     destructiveHint: bool | None = None
     idempotentHint: bool | None = None
     openWorldHint: bool | None = None
+
     model_config = ConfigDict(extra="allow")
 
 
-class Tool(BaseModel):
-    """
-    Definition for a tool the client can call.
-    """
-
-    name: str
-    title: str | None = None
+class Tool(BaseMetadata):
     description: str | None = None
     inputSchema: dict[str, Any]
     outputSchema: dict[str, Any] | None = None
     annotations: ToolAnnotations | None = None
-    meta_: dict[str, Any] | None = Field(alias="_meta", default=None)
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
 
 
-class ListToolsResult(Result):
+class ListToolsRequest(PaginatedRequest):
+    method: Literal["tools/list"] = Field(default="tools/list", frozen=True)
+
+
+class ListToolsResult(PaginatedResult):
     tools: list[Tool]
 
 
-class ListToolsResponse(JSONRPCResponse[ListToolsResult]):
-    result: ListToolsResult
+class ToolListChangedNotification(JSONRPCMessage, Notification):
+    method: Literal["notifications/tools/list_changed"] = Field(
+        default="notifications/tools/list_changed", frozen=True
+    )
+
+
+class CallToolParams(BaseModel):
+    name: str
+    arguments: dict[str, Any] | None = None
 
 
 class CallToolRequest(JSONRPCRequest):
-    method: str = Field(default="tools/call", frozen=True)
-    params: dict[str, Any]
+    method: Literal["tools/call"] = Field(default="tools/call", frozen=True)
+    params: CallToolParams
+
+
+class TextContent(BaseModel):
+    type: Literal["text"]
+    text: str
+    annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+
+
+class ImageContent(BaseModel):
+    type: Literal["image"]
+    data: str
+    mimeType: str
+    annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+
+
+class AudioContent(BaseModel):
+    type: Literal["audio"]
+    data: str
+    mimeType: str
+    annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+
+
+class ResourceLink(Resource):
+    type: Literal["resource_link"] = Field(default="resource_link", frozen=True)
+
+
+class EmbeddedResource(BaseModel):
+    type: Literal["resource"] = Field(default="resource", frozen=True)
+    resource: TextResourceContents | BlobResourceContents
+    annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+
+
+ContentBlock = TextContent | ImageContent | AudioContent | ResourceLink | EmbeddedResource
 
 
 class CallToolResult(Result):
-    """The server's response to a tool call."""
-
     content: list[dict[str, Any]]
+    structuredContent: dict[str, Any] | None = None
     isError: bool | None = None
-    structuredContent: dict[str, Any] | list[Any] | None = None
-    meta_: dict[str, Any] | None = Field(alias="_meta", default=None)
 
 
-class CallToolResponse(JSONRPCResponse[CallToolResult]):
-    result: CallToolResult
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
 
 
-# Resources and prompts
-class ListResourcesRequest(JSONRPCRequest):
-    method: str = Field(default="resources/list", frozen=True)
-    params: dict[str, Any] | None = None
-
-
-class ListResourcesResponse(JSONRPCResponse[DictResult]):
-    result: DictResult
-
-
-class ListPromptsRequest(JSONRPCRequest):
-    method: str = Field(default="prompts/list", frozen=True)
-    params: dict[str, Any] | None = None
-
-
-class ListPromptsResponse(JSONRPCResponse[DictResult]):
-    result: DictResult
-
-
-# Logging level enum used by notifications
-class LogLevel(str, Enum):
+class LoggingLevel(str, Enum):
     DEBUG = "debug"
     INFO = "info"
     NOTICE = "notice"
@@ -279,153 +449,185 @@ class LogLevel(str, Enum):
     EMERGENCY = "emergency"
 
 
-# Notification models
-class NotificationCapability(BaseModel):
-    method: str
+class SetLevelParams(BaseModel):
+    level: LoggingLevel
 
 
-class NotificationSubscription(BaseModel):
-    subscription_id: str
-    method: str
-    created_at: float
-    filters: dict[str, Any] | None = None
+class SetLevelRequest(JSONRPCRequest):
+    method: Literal["logging/setLevel"] = Field(default="logging/setLevel", frozen=True)
+    params: SetLevelParams
 
 
-class EnhancedProgressNotificationParams(NotificationParams):
-    progressToken: ProgressToken
-    progress: float
-    total: float | None = None
-    message: str | None = None
-
-
-class EnhancedProgressNotification(
-    Notification[EnhancedProgressNotificationParams, Literal["notifications/progress"]]
-):
-    method: Literal["notifications/progress"]
-    params: EnhancedProgressNotificationParams
-
-
-class LoggingMessageNotificationParams(NotificationParams):
-    level: LogLevel
-    data: Any
+class LoggingMessageParams(BaseModel):
+    level: LoggingLevel
     logger: str | None = None
+    data: Any
 
 
-class LoggingMessageNotification(
-    Notification[LoggingMessageNotificationParams, Literal["notifications/message"]]
-):
-    method: Literal["notifications/message"]
-    params: LoggingMessageNotificationParams
+class LoggingMessageNotification(JSONRPCMessage, Notification):
+    method: Literal["notifications/message"] = Field(default="notifications/message", frozen=True)
+    params: LoggingMessageParams
 
 
-class ResourceUpdatedNotificationParams(NotificationParams):
-    uri: str
-    timestamp: str | None = None
+# -----------------------------------------------------------------------------
+# Cancellation (notification-only)
+# -----------------------------------------------------------------------------
 
 
-class ResourceUpdatedNotification(
-    Notification[
-        ResourceUpdatedNotificationParams,
-        Literal["notifications/resources/updated"],
-    ]
-):
-    method: Literal["notifications/resources/updated"]
-    params: ResourceUpdatedNotificationParams
-
-
-class ResourceListChangedNotificationParams(NotificationParams):
-    pass
-
-
-class ResourceListChangedNotification(
-    Notification[
-        ResourceListChangedNotificationParams,
-        Literal["notifications/resources/list_changed"],
-    ]
-):
-    method: Literal["notifications/resources/list_changed"]
-    params: ResourceListChangedNotificationParams
-
-
-class ToolListChangedNotificationParams(NotificationParams):
-    pass
-
-
-class ToolListChangedNotification(
-    Notification[
-        ToolListChangedNotificationParams,
-        Literal["notifications/tools/list_changed"],
-    ]
-):
-    method: Literal["notifications/tools/list_changed"]
-    params: ToolListChangedNotificationParams
-
-
-class CancelledNotificationParams(NotificationParams):
-    requestId: str | int
+class CancelledParams(BaseModel):
+    requestId: RequestId
     reason: str | None = None
 
 
-class CancelledNotification(
-    Notification[CancelledNotificationParams, Literal["notifications/cancelled"]]
-):
-    method: Literal["notifications/cancelled"]
-    params: CancelledNotificationParams
+class CancelledNotification(JSONRPCMessage, Notification):
+    method: Literal["notifications/cancelled"] = Field(
+        default="notifications/cancelled", frozen=True
+    )
+    params: CancelledParams
 
 
-# Logging set level
-class SetLevelRequest(JSONRPCRequest):
-    method: str = Field(default="logging/setLevel", frozen=True)
-    params: dict[str, Any]
+# -----------------------------------------------------------------------------
+# Sampling (server -> client)
+# -----------------------------------------------------------------------------
 
 
-class SetLevelResponse(JSONRPCResponse[DictResult]):
-    result: DictResult = Field(default_factory=DictResult)
+class SamplingMessage(BaseModel):
+    role: Role
+    content: TextContent | ImageContent | AudioContent
 
 
-# Subscription requests
-class SubscribeRequest(JSONRPCRequest):
-    method: str = Field(default="notifications/subscribe", frozen=True)
-    params: dict[str, Any]
+class ModelHint(BaseModel):
+    name: str | None = None
 
 
-class SubscribeResponse(JSONRPCResponse[dict[str, Any]]):
-    result: dict[str, Any]
+class ModelPreferences(BaseModel):
+    hints: list[ModelHint] | None = None
+    costPriority: float | None = None
+    speedPriority: float | None = None
+    intelligencePriority: float | None = None
 
 
-class UnsubscribeRequest(JSONRPCRequest):
-    method: str = Field(default="notifications/unsubscribe", frozen=True)
-    params: dict[str, Any]
+class CreateMessageParams(BaseModel):
+    messages: list[SamplingMessage]
+    modelPreferences: ModelPreferences | None = None
+    systemPrompt: str | None = None
+    includeContext: Literal["none", "thisServer", "allServers"] | None = None
+    temperature: float | None = None
+    maxTokens: int
+    stopSequences: list[str] | None = None
+    metadata: dict[str, Any] | None = None
 
 
-class UnsubscribeResponse(JSONRPCResponse[dict[str, Any]]):
-    result: dict[str, Any]
+class CreateMessageRequest(JSONRPCRequest):
+    method: Literal["sampling/createMessage"] = Field(default="sampling/createMessage", frozen=True)
+    params: CreateMessageParams
 
 
-# Union for all messages (handy for middleware typing)
+class CreateMessageResult(Result, SamplingMessage):
+    model: str
+    stopReason: Literal["endTurn", "stopSequence", "maxTokens"] | str | None = None
+
+
+# -----------------------------------------------------------------------------
+# Completion (client -> server)
+# -----------------------------------------------------------------------------
+
+
+class ResourceTemplateReference(BaseModel):
+    type: Literal["ref/resource"]
+    uri: str
+
+
+class PromptReference(BaseMetadata):
+    type: Literal["ref/prompt"]
+
+
+class CompletionArgument(BaseModel):
+    name: str
+    value: str
+
+
+class CompletionContext(BaseModel):
+    arguments: dict[str, str] | None = None
+
+
+class CompleteParams(BaseModel):
+    ref: ResourceTemplateReference | PromptReference
+    argument: CompletionArgument
+    context: CompletionContext | None = None
+
+
+class CompleteRequest(JSONRPCRequest):
+    method: Literal["completion/complete"] = Field(default="completion/complete", frozen=True)
+    params: CompleteParams
+
+
+class Completion(BaseModel):
+    values: list[str]
+    total: int | None = None
+    hasMore: bool | None = None
+
+
+class CompleteResult(Result):
+    completion: Completion
+
+
+# -----------------------------------------------------------------------------
+# Roots
+# -----------------------------------------------------------------------------
+
+
+class ListRootsRequest(JSONRPCRequest):
+    method: Literal["roots/list"] = Field(default="roots/list", frozen=True)
+
+
+class Root(BaseModel):
+    uri: str
+    name: str | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+
+
+class ListRootsResult(Result):
+    roots: list[Root]
+
+
+class RootsListChangedNotification(JSONRPCMessage, Notification):
+    method: Literal["notifications/roots/list_changed"] = Field(
+        default="notifications/roots/list_changed", frozen=True
+    )
+
+
+# -----------------------------------------------------------------------------
+# Elicitation (server -> client)
+# -----------------------------------------------------------------------------
+
+ElicitRequestedSchema = dict[str, Any]
+
+
+class ElicitParams(BaseModel):
+    message: str
+    requestedSchema: ElicitRequestedSchema
+
+
+class ElicitRequest(JSONRPCRequest):
+    method: Literal["elicitation/create"] = Field(default="elicitation/create", frozen=True)
+    params: ElicitParams
+
+
+class ElicitResult(Result):
+    action: Literal["accept", "decline", "cancel"]
+    content: dict[str, str | int | float | bool | None] | None = None
+
+
+# -----------------------------------------------------------------------------
+# Union for middleware typing and convenience
+# -----------------------------------------------------------------------------
+
 MCPMessage = (
     JSONRPCRequest
     | JSONRPCResponse[Any]
     | JSONRPCError
-    | PingRequest
-    | PingResponse
-    | InitializeRequest
-    | InitializeResponse
-    | ListToolsRequest
-    | ListToolsResponse
-    | CallToolRequest
-    | CallToolResponse
-    | CancelRequest
-    | ShutdownRequest
-    | ShutdownResponse
-    | ListResourcesRequest
-    | ListResourcesResponse
-    | ListPromptsRequest
-    | ListPromptsResponse
-    | SetLevelRequest
-    | SetLevelResponse
-    | SubscribeRequest
-    | SubscribeResponse
-    | UnsubscribeRequest
-    | UnsubscribeResponse
+    | CancelledNotification
+    | ProgressNotification
+    | LoggingMessageNotification
 )

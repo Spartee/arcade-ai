@@ -123,8 +123,8 @@ class StdioServer(MCPServer):
         logger.info("Shutting down stdio server...")
         self.running = False
 
-        # Signal shutdown to MCP server
-        await super().shutdown()
+        # Stop MCP server managers
+        await super().stop()
 
         # Clean up IO queues and threads
         try:
@@ -142,6 +142,9 @@ class StdioServer(MCPServer):
     async def run(self) -> None:
         """Run the stdio server with signal handling."""
         self.running = True
+
+        # Start MCP server managers
+        await super().start()
 
         # Set up signal handlers
         loop = asyncio.get_running_loop()

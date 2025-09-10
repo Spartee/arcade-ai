@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""01: Inline tool and server in one file.
+"""This example show how to create a simple MCP server with a single tool.
 
-Run:
-  python 01_inline_server.py [stream|sse|stdio]
+- Define a tool with @tool
+- Start an MCP server using arcade_mcp.Server
+- Run with any transport: stream (default), sse, stdio.
 """
 
-# standard library
-import sys
 from typing import Annotated
 
-# third-party
 from arcade_mcp import Server
 from arcade_tdk import tool
 
@@ -24,11 +22,10 @@ def echo(text: Annotated[str, "The text to echo back"]) -> str:
 
 
 # Create server and register the local tool
-server = Server(name="inline_example", version="0.1.0")
+server = Server(name="simple_mcp", version="0.1.0", log_level="DEBUG")
 server.add_tool(echo)
-
-
-if __name__ == "__main__":
-    # Default to streaming transport for local dev (Cursor/Claude Desktop compatible)
-    transport = sys.argv[1] if len(sys.argv) > 1 else "stream"
-    server.run(transport=transport, host="0.0.0.0", port=8000)  # noqa: S104
+server.run(
+    transport="streamable-http",  # or "stdio"
+    host="127.0.0.1",
+    port=8000,
+)

@@ -7,7 +7,7 @@ name = "arcade-mcp"
 version = "2.0.0"
 description = "Model Context Protocol (MCP) server framework for Arcade AI"
 readme = "README.md"
-authors = [{ name = "Arcade AI" }]
+authors = [{ name = "Arcade.dev" }]
 license = { text = "Apache-2.0" }
 classifiers = [
     "Development Status :: 4 - Beta",

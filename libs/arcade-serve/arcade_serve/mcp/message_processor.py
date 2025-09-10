@@ -3,7 +3,7 @@ import json
 import logging
 from typing import Any, Callable, TypeVar
 
-from arcade_serve.mcp.types import InitializeRequest, JSONRPCRequest, MCPMessage
+from arcade_serve.mcp.types import JSONRPCRequest, MCPMessage
 
 logger = logging.getLogger("arcade.mcp")
 
@@ -38,16 +38,12 @@ class MCPMessageProcessor:
                 if isinstance(parsed, dict):
                     method = parsed.get("method")
                     # Convert to appropriate message type
-                    if method == "initialize" and "id" in parsed:
-                        logger.debug(f"Parsed initialize request: {parsed}")
-                        message = InitializeRequest(**parsed)
-                    elif method and method.startswith("notifications/"):
+                    if method and method.startswith("notifications/"):
                         # It's a notification, log it but pass through as dict
                         logger.debug(f"Received notification: {method}")
-                        # Keep as parsed dict to avoid validation errors on unknown notifications
                         message = parsed
                     elif "method" in parsed and "id" in parsed:
-                        # Regular method request
+                        # Regular method request (generic JSON-RPC request)
                         logger.debug(f"Parsed method request: {method}")
                         message = JSONRPCRequest(**parsed)
                     # Other message types can be handled similarly

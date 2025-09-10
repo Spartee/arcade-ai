@@ -46,8 +46,8 @@ class MCPLoggingMiddleware:
         self.log_errors = log_errors
         self.min_duration_to_log_ms = min_duration_to_log_ms
         self.request_log_format = "[MCP>] {method}{params_str} (id: {id})"
-        self.response_log_format = "[MCP<] {method} completed in {duration:.2f}ms (id: {id})"
-        self.error_log_format = "[MCP!] {method} error: {error} (id: {id})"
+        self.response_log_format = "[MCP<] completed in {duration:.2f}ms (id: {id})"
+        self.error_log_format = "[MCP!] error: {error} (id: {id})"
 
         # If in stdio mode, ensure MCP logs go to stderr
         if stdio_mode:
@@ -126,15 +126,9 @@ class MCPLoggingMiddleware:
         try:
             # Calculate request duration if we have the start time
             duration_ms = 0
-            request = getattr(message, "_request", None)
-            if request:
-                start_time = getattr(request, "_mcp_start_time", None)
-                if start_time:
-                    duration_ms = (time.time() - start_time) * 1000
-            else:
-                start_time = getattr(message, "_mcp_start_time", None)
-                if start_time:
-                    duration_ms = (time.time() - start_time) * 1000
+            start_time = getattr(message, "_mcp_start_time", None)
+            if start_time:
+                duration_ms = (time.time() - start_time) * 1000
 
             # Skip if below minimum duration threshold
             if self.min_duration_to_log_ms > 0 and duration_ms < self.min_duration_to_log_ms:
@@ -144,7 +138,6 @@ class MCPLoggingMiddleware:
             if hasattr(message, "error") and message.error is not None:
                 if self.log_errors:
                     error_msg = self.error_log_format.format(
-                        method=getattr(message, "method", "unknown"),
                         error=getattr(message.error, "message", str(message.error)),
                         id=getattr(message, "id", "none"),
                     )
@@ -154,10 +147,9 @@ class MCPLoggingMiddleware:
             # Log successful response
             result_str = ""
             if self.log_response_body and hasattr(message, "result"):
-                result_str = f": {self._format_result(message.result)}"
+                result_str = f": {self._format_result(getattr(message, 'result', {}))}"
 
             log_msg = self.response_log_format.format(
-                method=getattr(message, "method", "unknown"),
                 duration=duration_ms,
                 id=getattr(message, "id", "none"),
                 result_str=result_str,

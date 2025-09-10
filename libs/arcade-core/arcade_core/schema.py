@@ -104,7 +104,7 @@ class ToolAuthRequirement(BaseModel):
     # or
     #    client.auth.authorize(provider=AuthProvider.google, scopes=["profile", "email"])
     #
-    # The Arcade SDK translates these into the appropriate provider ID (Google) and type (OAuth2).
+    # The Arcade TDK translates these into the appropriate provider ID (Google) and type (OAuth2).
     # The only time the developer will set these is if they are using a custom auth provider.
     provider_id: str | None = None
     """The provider ID configured in Arcade that acts as an alias to well-known configuration."""
@@ -324,6 +324,9 @@ class ToolContext(BaseModel):
     _notify: ToolNotifier | None = None
     _min_log_level: str = "info"  # Default minimum log level
 
+    # Private field for client request API
+    _client_request: Any | None = None
+
     model_config = {"arbitrary_types_allowed": True}
 
     @property
@@ -354,6 +357,76 @@ class ToolContext(BaseModel):
     def set_min_log_level(self, level: str) -> None:
         """Set the minimum log level for filtering."""
         self._min_log_level = level
+
+    def set_client_request_api(self, client_request_api: Any) -> None:
+        """Inject a client request API (server→client JSON-RPC) for MCP features."""
+        self._client_request = client_request_api
+
+    class ClientAPI:
+        def __init__(self, sender: Any) -> None:
+            self._sender = sender
+
+        async def create_message(
+            self,
+            messages: list[Any],
+            *,
+            max_tokens: int,
+            system_prompt: str | None = None,
+            include_context: str | None = None,
+            temperature: float | None = None,
+            stop_sequences: list[str] | None = None,
+            metadata: dict[str, Any] | None = None,
+            model_preferences: dict[str, Any] | None = None,
+            timeout: float | None = 120.0,
+        ) -> Any:
+            params = {
+                "messages": messages,
+                "maxTokens": max_tokens,
+            }
+            if system_prompt is not None:
+                params["systemPrompt"] = system_prompt
+            if include_context is not None:
+                params["includeContext"] = include_context
+            if temperature is not None:
+                params["temperature"] = temperature
+            if stop_sequences is not None:
+                params["stopSequences"] = stop_sequences
+            if metadata is not None:
+                params["metadata"] = metadata
+            if model_preferences is not None:
+                params["modelPreferences"] = model_preferences
+            return await self._sender("sampling/createMessage", params, timeout)
+
+        async def list_roots(self, timeout: float | None = 30.0) -> Any:
+            return await self._sender("roots/list", None, timeout)
+
+        async def elicit(
+            self,
+            message: str,
+            requested_schema: dict[str, Any],
+            timeout: float | None = 180.0,
+        ) -> Any:
+            params = {"message": message, "requestedSchema": requested_schema}
+            return await self._sender("elicitation/create", params, timeout)
+
+        async def complete(
+            self,
+            ref: dict[str, Any],
+            argument: dict[str, str],
+            context: dict[str, Any] | None = None,
+            timeout: float | None = 30.0,
+        ) -> Any:
+            params = {"ref": ref, "argument": argument}
+            if context is not None:
+                params["context"] = context
+            return await self._sender("completion/complete", params, timeout)
+
+    @property
+    def client(self) -> ClientAPI:
+        """Access client-side MCP features (LLM sampling, roots, elicitation, completion)."""
+        if self._client_request is None:
+            raise RuntimeError("Client request API not configured for this context")
+        return ToolContext.ClientAPI(self._client_request)
 
     def get_auth_token_or_empty(self) -> str:
         """Retrieve the authorization token, or return an empty string if not available."""

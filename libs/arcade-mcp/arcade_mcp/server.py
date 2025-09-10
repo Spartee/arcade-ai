@@ -2,20 +2,25 @@
 
 # standard library
 import asyncio
-import inspect
 import logging
-from collections import defaultdict
-from pathlib import Path
 from typing import Any, Callable
 
-import toml  # TODO debate
-from arcade_core.catalog import MaterializedTool, ToolCatalog
-from arcade_core.config import config
+import uvicorn
+from arcade_core.catalog import ToolCatalog
 from arcade_core.toolkit import Toolkit
-from dotenv import load_dotenv
+from arcade_serve.fastapi.sse import SSEComponent
+from arcade_serve.fastapi.streamable import StreamableHTTPComponent
+from arcade_serve.fastapi.worker import FastAPIWorker
+from arcade_serve.mcp.stdio import StdioServer
 from fastapi import FastAPI
 
-from arcade_mcp.transports import SSETransport, StdioTransport, StreamTransport
+from arcade_mcp.config import (
+    MCPConfig,
+    ServerConfig,
+    ServerContext,
+    ServerToolkitMetadata,
+    init_server_toolkit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +37,7 @@ class Server:
         server.add_toolkit(tools)
 
         if __name__ == "__main__":
-            server.run(transport="stream")
+            server.run(transport="streamable-http")
     """
 
     def __init__(
@@ -41,134 +46,73 @@ class Server:
         name: str | None = None,
         version: str | None = None,
         auth_disabled: bool = True,
-        local_context: dict[str, Any] | None = None,
+        local_context: ServerContext | dict[str, Any] | None = None,
         app: FastAPI | None = None,
+        log_level: str = "INFO",
+        rate_limit_per_min: int = 60,
+        debounce_ms: int = 100,
+        max_queue: int = 1000,
+        session_timeout_sec: int = 300,
+        cleanup_interval_sec: int = 10,
+        max_sessions: int = 1000,
+        arcade_api_key: str | None = None,
+        arcade_api_url: str | None = None,
+        enable_logging: bool | None = None,
     ):
         """
         Initialize the MCP server.
 
         Args:
-            name: Server name (defaults to package name)
-            version: Server version (defaults to package version)
+            name: Server name (overrides pyproject/env)
+            version: Server version (overrides pyproject/env)
             auth_disabled: Whether to disable authentication (default: True for local development)
-            local_context: Local context configuration
+            local_context: Local context configuration (typed ServerContext or dict)
             app: FastAPI app to use
         """
-        self.name = name or self._get_default_name()
-        self.version = version or self._get_default_version()
         self.auth_disabled = auth_disabled
-        self.local_context = local_context or {}
+
+        # Normalize local context to ServerContext
+        # TODO make this more robust
+        if isinstance(local_context, ServerContext):
+            self.local_context = local_context
+        elif isinstance(local_context, dict):
+            self.local_context = ServerContext(**local_context)
+        else:
+            self.local_context = ServerContext()
+
+        # Build toolkit from pyproject/.env; allow explicit overrides via ctor
+        toolkit = init_server_toolkit()
+        self.name = name or toolkit.name
+        self.version = version or toolkit.version
+
         self.app = app
         self.catalog = ToolCatalog()
-        self._toolkits: list[Toolkit] = []
-        self._tools: list[Callable] = []
-        self._auto_discovered = False
 
-        # Load .env file if it exists
-        self._load_env()
-
-    def _get_default_name(self) -> str:
-        """Get default server name from package."""
-        # Try to get the package name from the calling module
-        frame = inspect.currentframe()
-        if frame and frame.f_back:
-            module = inspect.getmodule(frame.f_back)
-            if module and module.__package__:
-                return module.__package__
-        return "arcade-mcp-server"
-
-    def _get_default_version(self) -> str:
-        """Get default server version."""
-        return "1.0.0"
-
-    def _load_env(self) -> None:
-        """Load .env file from the current directory."""
-        env_path = Path.cwd() / ".env"
-        if env_path.exists():
-            load_dotenv(env_path, override=False)
-            logger.info(f"Loaded environment from {env_path}")
-
-    def _auto_discover_toolkit(self) -> None:  # noqa: C901
-        """Auto-discover toolkits from (1) cwd, (2) pyproject packages, (3) installed."""
-        if self._auto_discovered:
-            return
-
-        cwd = Path.cwd()
-        discovered: list[Toolkit] = []
-        seen: set[str] = set()
-
-        def _add_toolkit(tk: Toolkit) -> None:
-            if tk.package_name not in seen:
-                self.add_toolkit(tk)
-                discovered.append(tk)
-                seen.add(tk.package_name)
-
-        # (1) CWD
-        try:
-            if (cwd / "pyproject.toml").is_file():
-                tk = Toolkit.from_directory(cwd)
-                _add_toolkit(tk)
-                logger.info(
-                    f"Auto-discovered local toolkit '{tk.name}' with "
-                    f"{sum(len(tools) for tools in tk.tools.values())} tools"
-                )
-        except Exception as e:
-            logger.debug(f"Failed to load local toolkit from {cwd}: {e}")
-
-        # (2) Pyproject-declared packages
-        try:
-            if toml and (cwd / "pyproject.toml").is_file():
-                data = toml.load(cwd / "pyproject.toml")
-
-                # project.name → try src/<name> and <name>
-                pkg_name = (data.get("project") or {}).get("name")
-                if isinstance(pkg_name, str) and pkg_name:
-                    for base in (cwd / "src", cwd):
-                        candidate = base / pkg_name
-                        try:
-                            if candidate.is_dir():
-                                tk = Toolkit.from_directory(candidate)
-                                _add_toolkit(tk)
-                        except Exception as e:
-                            logger.debug(f"Skipped candidate {candidate}: {e}")
-
-                # setuptools find.include patterns
-                includes = (
-                    (data.get("tool") or {})
-                    .get("setuptools", {})
-                    .get("packages", {})
-                    .get("find", {})
-                    .get("include", [])
-                )
-                if isinstance(includes, list):
-                    for inc in includes:
-                        # try both src/ and flat layouts
-                        for base in (cwd / "src", cwd):
-                            candidate = base / str(inc).replace("*", "")
-                            try:
-                                if candidate.is_dir():
-                                    tk = Toolkit.from_directory(candidate)
-                                    _add_toolkit(tk)
-                            except Exception as e:
-                                logger.debug(f"Skipped include '{inc}' at {candidate}: {e}")
-        except Exception as e:
-            logger.debug(f"Failed parsing pyproject packages: {e}")
-
-        # (3) Installed Arcade toolkits
-        try:
-            for tk in Toolkit.find_all_arcade_toolkits():
-                _add_toolkit(tk)
-        except Exception as e:
-            logger.debug(f"Installed toolkit discovery failed: {e}")
-
-        self._auto_discovered = True
-        if discovered:
-            logger.info(
-                f"Auto-discovered {len(discovered)} toolkit(s): "
-                f"{', '.join(t.package_name for t in discovered)}"
-            )
-        else:
-            logger.debug("No toolkits found during auto-discovery")
+        # Construct typed configuration using merged sources
+        self.config = MCPConfig(
+            server=ServerConfig(
+                log_level=log_level,
+                rate_limit_per_min=rate_limit_per_min,
+                debounce_ms=debounce_ms,
+                max_queue=max_queue,
+                cleanup_interval_sec=cleanup_interval_sec,
+                max_sessions=max_sessions,
+                session_timeout_sec=session_timeout_sec,
+            ),
+            tool_metadata=ServerToolkitMetadata(
+                name=self.name,
+                version=self.version,
+                description=toolkit.description,
+                package_name=toolkit.package_name,
+                author=toolkit.author,
+                repository=toolkit.repository,
+                homepage=toolkit.homepage,
+            ),
+            enable_logging=enable_logging if enable_logging is not None else True,
+            arcade_api_key=arcade_api_key,
+            arcade_api_url=arcade_api_url,
+            context=self.local_context,
+        )
 
     def add_toolkit(self, toolkit: Toolkit) -> None:
         """
@@ -177,133 +121,129 @@ class Server:
         Args:
             toolkit: The toolkit to add
         """
-        self._toolkits.append(toolkit)
         self.catalog.add_toolkit(toolkit)
 
-        # Check for auth requirements
-        self._check_auth_requirements(toolkit)
-
-    def add_tool(self, tool: Callable) -> None:
+    def add_tool(self, tool: Callable, metadata: ServerToolkitMetadata | None = None) -> None:
         """
-        Add a single tool to the server. Local tools are grouped under the
-        'Local' toolkit using the catalog's existing add_tool API.
+        Add a single tool to the server using ServerToolkitMetadata.
+
+        If no metadata is provided, a Toolkit will be synthesized using the
+        server identity and pyproject metadata when available.
 
         Args:
             tool: The tool function to add
+            metadata: Optional ServerToolkitMetadata for toolkit attribution
         """
-        # Register immediately under the synthetic 'Local' toolkit for clarity
-        self.catalog.add_tool(tool, "Local")
-        self._tools.append(tool)
-
-        # Best-effort auth check for locally added tools
-        try:
-            # Wrap in a temporary ToolkitDefinition name for auth messages
-            tmp_toolkit = Toolkit(
-                name="Local",
-                package_name="local",
-                version="0.0.0",
-                description="Locally defined tools",
-                author=[],
-                repository=None,
-                homepage=None,
-            )
-            self._check_auth_requirements(tmp_toolkit)
-        except Exception as e:
-            # Do not block local dev on auth inspection failures
-            logger.debug("Auth inspection for local tools skipped: %s", e)
-
-    def _check_auth_requirements(self, toolkit: Toolkit) -> None:
-        """Check if any tools require authentication."""
-        for tools_dict in toolkit.tools.values():
-            for tool in tools_dict:
-                if hasattr(tool, "_arcade_tool_decorator"):
-                    decorator = tool._arcade_tool_decorator
-                    if decorator.get("requires_auth"):
-                        self._ensure_auth_configured()
-
-    def _ensure_auth_configured(self) -> None:
-        """Ensure authentication is properly configured."""
-        if self.auth_disabled:
-            return
-
-        # Check if user is logged in to Arcade
-        if not config.api or not config.api.key:
-            raise RuntimeError(
-                "Tools using requires_auth require an Arcade account and the "
-                "Arcade Cloud Service. Run 'arcade login' to continue."
-            )
-
-    def _log_tools(self) -> None:
-        """Log all tools being served, grouped by toolkit (including 'Local')."""
-        logger.info(f"Starting {self.name} v{self.version} MCP server")
-
-        # Group tools by toolkit name from the catalog
-        grouped: dict[str, list[MaterializedTool]] = defaultdict(list)
-        for mt in self.catalog:
-            tk_name = mt.definition.toolkit.name or "Unknown"
-            grouped[tk_name].append(mt)
-
-        total_tools = 0
-        for tk_name, mats in grouped.items():
-            total_tools += len(mats)
-            logger.info(f"Loaded toolkit '{tk_name}' ({len(mats)} tools)")
-            for mt in mats:
-                origin = mt.meta.module
-                logger.info(f"  - {mt.name} (module: {origin})")
-
-        if total_tools == 0:
-            logger.warning("No tools loaded! Make sure your package has @tool decorated functions.")
-        else:
-            logger.info(f"Total tools available: {total_tools}")
+        tk_meta: ServerToolkitMetadata = metadata or self.config.tool_metadata
+        # Using catalog API directly with toolkit name ensures it's grouped correctly
+        self.catalog.add_tool(tool, tk_meta.name)
 
     def run(
         self,
-        transport: str = "stream",
+        transport: str = "streamable-http",
         host: str = "0.0.0.0",  # noqa: S104
         port: int = 8000,
+        reload: bool = False,
         **kwargs: Any,
     ) -> None:
         """
         Run the server with the specified transport.
 
         Args:
-            transport: Transport type ("stream", "sse", or "stdio")
+            transport: Transport type ("streamable-http", "sse", or "stdio")
             host: Host to bind to (for stream/sse transports)
             port: Port to bind to (for stream/sse transports)
+            reload: Auto-reload for HTTP transports
             **kwargs: Additional transport-specific options
         """
-        # Auto-discover toolkits only if neither explicit toolkits nor local tools were added
-        if not self._toolkits and not self._tools:
-            self._auto_discover_toolkit()
+        # Normalize log level once here for uvicorn
+        normalized_log_level = str(self.config.server.log_level).lower()
 
-        # Log tools being served (but not for stdio to avoid interfering with protocol)
-        if transport != "stdio":
-            self._log_tools()
+        context_dict = self.config.context.model_dump()
 
-        # Select and run transport
         if transport == "stdio":
-            stdio = StdioTransport(
+            stdio_server = StdioServer(
                 self.catalog,
                 auth_disabled=self.auth_disabled,
-                local_context=self.local_context,
-                app=self.app,
+                local_context=context_dict,
             )
-            asyncio.run(stdio.run())
-        elif transport == "sse":
-            sse = SSETransport(
-                self.catalog,
-                auth_disabled=self.auth_disabled,
-                local_context=self.local_context,
-                app=self.app,
+            asyncio.run(stdio_server.run())
+            return
+
+        # If not stdio, we need an HTTP server
+        # currently we default to using a FASTAPI app
+        if self.app is None:
+            self.app = FastAPI(
+                title=self.name,
+                description="Arcade MCP server",
+                version=self.version,
+                openapi_url="/openapi.json",
+                docs_url="/docs",
+                redoc_url="/redoc",
             )
-            sse.run(host=host, port=port, **kwargs)
-        elif transport == "stream":
-            stream = StreamTransport(
-                self.catalog,
-                auth_disabled=self.auth_disabled,
-                local_context=self.local_context,
-                app=self.app,
+
+        # Create worker
+        worker = FastAPIWorker(
+            app=self.app,
+            disable_auth=self.auth_disabled,
+        )
+
+        # Ensure the component sees the populated catalog
+        worker.catalog = self.catalog
+
+        # Shared component kwargs
+        component_kwargs: dict[str, Any] = {
+            "local_context": context_dict,
+            "session_timeout_sec": kwargs.pop(
+                "session_timeout_sec", self.config.server.session_timeout_sec
+            ),
+            "cleanup_interval_sec": kwargs.pop(
+                "cleanup_interval_sec", self.config.server.cleanup_interval_sec
+            ),
+            "max_sessions": kwargs.pop("max_sessions", self.config.server.max_sessions),
+            "max_queue": kwargs.pop("max_queue", self.config.server.max_queue),
+            "log_level": normalized_log_level,
+            "rate_limit_per_min": kwargs.pop(
+                "rate_limit_per_min", self.config.server.rate_limit_per_min
+            ),
+            "debounce_ms": kwargs.pop("debounce_ms", self.config.server.debounce_ms),
+            "server_name": kwargs.pop("server_name", self.name),
+            "server_version": kwargs.pop("server_version", self.version),
+            "server_title": kwargs.pop("server_title", self.name),
+        }
+
+        # Register appropriate component
+        if transport == "sse":
+            worker.register_component(SSEComponent, **component_kwargs)
+        elif transport == "streamable-http":
+            worker.register_component(
+                StreamableHTTPComponent,
+                **{
+                    k: v
+                    for k, v in component_kwargs.items()
+                    if k
+                    in {
+                        "local_context",
+                        "log_level",
+                        "rate_limit_per_min",
+                        "debounce_ms",
+                        "server_name",
+                        "server_version",
+                        "server_title",
+                    }
+                },
             )
-            stream.run(host=host, port=port, **kwargs)
         else:
-            raise ValueError(f"Unknown transport '{transport}'. Choose from: stdio, sse, stream")
+            raise ValueError(
+                f"Unknown transport '{transport}'. Choose from: stdio, sse, streamable-http"
+            )
+
+        # Run with uvicorn
+        uvicorn.run(
+            self.app,
+            host=host,
+            port=port,
+            reload=reload,
+            log_level=normalized_log_level,
+            **kwargs,
+        )

@@ -9,7 +9,7 @@ from typing import Any
 from arcade_tdk import LogLevel
 
 from arcade_serve.mcp.notification_manager import NotificationManager
-from arcade_serve.mcp.types import LogLevel as MCPLogLevel
+from arcade_serve.mcp.types import LoggingLevel as MCPLogLevel
 
 # Log level priority for filtering (higher number = higher severity)
 LOG_LEVEL_PRIORITY = {
@@ -70,7 +70,7 @@ class MCPNotificationBackend:
         if not self._should_send_log(level.value):
             return
 
-        # Convert LogLevel enum to MCP LogLevel
+        # Convert LogLevel enum to MCP LoggingLevel
         mcp_level = MCPLogLevel(level.value)
 
         # Format the data according to MCP spec

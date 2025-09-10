@@ -1,4 +1,7 @@
+import asyncio
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from arcade_core.schema import ToolCallRequest, ToolCallResponse, ToolDefinition
@@ -25,6 +28,19 @@ class RequestData(BaseModel):
     """The deserialized body of the request (e.g. JSON)"""
 
 
+@dataclass
+class RouteSpec:
+    path: str
+    methods: list[str]
+    endpoint: Callable[..., Any]
+    response_class: Any | None = None
+    dependencies: list[Any] | None = None
+    operation_id: str | None = None
+    description: str | None = None
+    summary: str | None = None
+    tags: list[str] | None = None
+
+
 class Router(ABC):
     """
     A router is responsible for adding routes to the underlying framework hosting the worker.
@@ -43,6 +59,11 @@ class Router(ABC):
         """
         Add a route to the router.
         """
+        pass
+
+    @abstractmethod
+    def add_raw_route(self, spec: RouteSpec) -> None:
+        """Add a framework-native route described by RouteSpec."""
         pass
 
 
@@ -91,3 +112,25 @@ class WorkerComponent(ABC):
         Handle the request.
         """
         pass
+
+
+class TransportSession:
+    """
+    Framework-agnostic per-connection streaming session for transports.
+    Holds a bounded queue for outbound events, a last-active timestamp,
+    and exposes touch()/close()/send() helpers.
+    """
+
+    def __init__(self, session_id: str, max_queue_size: int = 1000) -> None:
+        self.session_id = session_id
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        self.last_active: float = time.time()
+
+    def touch(self) -> None:
+        self.last_active = time.time()
+
+    async def close(self) -> None:
+        await self.queue.put(None)
+
+    async def send(self, message: Any) -> None:
+        await self.queue.put(message)

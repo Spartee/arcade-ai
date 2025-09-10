@@ -1,32 +1,25 @@
 #!/usr/bin/env python3
-"""02: Add a Toolkit by importing and registering it on the server.
+"""02: Add a Toolkit by importing and registering it on the server (spec 2025-06-18).
 
-This demonstrates using Arcade toolkits through importing and adding to the server.
+This example demonstrates loading an installed toolkit and serving tools via MCP:
+- Load a `Toolkit` from a package (auto-discovers @tool functions)
+- Register toolkit on `arcade_mcp.Server`
+- Run with stream/sse/stdio transports
 
-Run:
-  python 02_add_toolkit.py [stream|sse|stdio]
+All tools receive a ToolContext with:
+- logging (context.log.*) → notifications/message
+- progress (context.notify.progress) → notifications/progress
+- secrets/auth applied automatically when declared
+- client-side MCP APIs: context.client.create_message / list_roots / elicit / complete
 """
 
-# standard library
-import sys
-
-# third-party
-from arcade_core.toolkit import Toolkit
+from arcade_core import Toolkit
 from arcade_mcp import Server
 
-# Example: use the "simple_mcp" example toolkit shipped in this repo
-# Adjust the package name if you want to load a different installed toolkit.
-TOOLKIT_PACKAGE = "simple_mcp"
-
-# Load Toolkit metadata + tool discovery from an installed/local package
-# (Will read pyproject metadata and scan the package for @tool functions.)
-toolkit = Toolkit.from_package(TOOLKIT_PACKAGE)
+toolkit = Toolkit.from_package("arcade_math")
 
 # Create server and add the toolkit
 server = Server(name="add_toolkit_example", version="0.1.0")
 server.add_toolkit(toolkit)
 
-
-if __name__ == "__main__":
-    transport = sys.argv[1] if len(sys.argv) > 1 else "stream"
-    server.run(transport=transport, host="0.0.0.0", port=8000)  # noqa: S104
+server.run(transport="streamable-http", host="127.0.0.1", port=8000)

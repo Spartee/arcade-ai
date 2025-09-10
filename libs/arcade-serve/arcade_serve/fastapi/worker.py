@@ -1,7 +1,9 @@
 import json
-from typing import Any, Callable
+from enum import Enum
+from typing import Any, Callable, cast
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from opentelemetry.metrics import Meter
 
@@ -9,7 +11,7 @@ from arcade_serve.core.base import (
     BaseWorker,
     Router,
 )
-from arcade_serve.core.common import RequestData, ResponseData, WorkerComponent
+from arcade_serve.core.common import RequestData, ResponseData, RouteSpec, WorkerComponent
 from arcade_serve.fastapi.auth import validate_engine_request
 from arcade_serve.utils import is_async_callable
 
@@ -129,4 +131,21 @@ class FastAPIRouter(Router):
             response_model=response_type,
             # **kwargs to pass to FastAPI
             **kwargs,
+        )
+
+    def add_raw_route(self, spec: RouteSpec) -> None:
+        """Mount a framework-native route described by RouteSpec."""
+        self.app.add_api_route(
+            spec.path,
+            spec.endpoint,
+            methods=spec.methods,
+            response_class=(
+                spec.response_class if spec.response_class is not None else JSONResponse
+            ),
+            response_model=None,
+            dependencies=spec.dependencies or [],
+            operation_id=spec.operation_id,
+            description=spec.description,
+            summary=spec.summary,
+            tags=cast(list[str | Enum] | None, spec.tags if spec.tags is not None else None),
         )

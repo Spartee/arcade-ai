@@ -6,8 +6,8 @@ import pytest
 from arcade_core.catalog import ToolCatalog
 from arcade_serve.mcp import server as mcp_server
 from arcade_serve.mcp.types import (
+    LATEST_PROTOCOL_VERSION,
     CallToolRequest,
-    CancelRequest,
     InitializeRequest,
     ListToolsRequest,
     PingRequest,
@@ -94,33 +94,40 @@ def server(sample_catalog):
 
 
 async def test_handle_ping(server):
-    req = PingRequest(id=123)
+    req = PingRequest(id=123, method="ping")
     resp = await server._handle_ping(req)  # pylint: disable=protected-access
     assert resp.id == 123
-    # Accept empty dict or explicit pong
-    assert resp.result in ({"pong": True}, {})
+    assert resp.result == {}
 
 
 async def test_handle_initialize(server):
-    req = InitializeRequest(id=1)
+    req = InitializeRequest(
+        id=1,
+        method="initialize",
+        params={
+            "protocolVersion": LATEST_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "client", "version": "0.0.0"},
+        },
+    )
     resp = await server._handle_initialize(req)  # pylint: disable=protected-access
     assert resp.id == 1
-    assert resp.result.protocolVersion == mcp_server.MCP_PROTOCOL_VERSION
+    assert resp.result.protocolVersion == LATEST_PROTOCOL_VERSION
     assert resp.result.serverInfo.name.startswith("Arcade")
 
 
 async def test_handle_list_tools(server):
-    req = ListToolsRequest(id=99)
+    req = ListToolsRequest(id=99, method="tools/list")
     resp = await server._handle_list_tools(req)  # pylint: disable=protected-access
     assert resp.id == 99
-    # Should list our sample tool only
     tool_names = [t.name for t in resp.result.tools]
-    assert "TestToolkit_MultiplyTool" in tool_names  # toolkit + "_" + tool
+    assert "TestToolkit_MultiplyTool" in tool_names
 
 
 async def test_handle_call_tool_success(server):
     req = CallToolRequest(
         id="call-1",
+        method="tools/call",
         params={
             "name": "TestToolkit_MultiplyTool",
             "arguments": {"a": 6, "b": 7},
@@ -145,13 +152,3 @@ async def test_send_response_dict(server, monkeypatch):
     await server._send_response(_Write(), {"foo": "bar"})  # pylint: disable=protected-access
 
     assert sent and sent[0].strip() == '{"foo": "bar"}'
-
-
-async def test_handle_cancel(server):
-    req = CancelRequest(id=77, params={"id": "abc"})
-    resp = await server._handle_cancel(req)  # pylint: disable=protected-access
-    # Accept dict or typed Result-like structure
-    if isinstance(resp.result, dict):
-        assert resp.result == {"ok": True}
-    else:
-        assert getattr(resp.result, "ok", False) is True

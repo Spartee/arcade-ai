@@ -4,12 +4,12 @@ import logging
 import os
 import uuid
 from enum import Enum
-from typing import Any, Callable, Union
+from typing import Any, Callable, cast
 
 from arcade_core.catalog import MaterializedTool, ToolCatalog
 from arcade_core.executor import ToolExecutor
 from arcade_core.schema import ToolAuthorizationContext, ToolContext, ToolMetadataItem
-from arcade_tdk import create_tool_logger, create_tool_notifier
+from arcade_tdk import LogLevel, create_tool_logger, create_tool_notifier
 from arcadepy import ArcadeError, AsyncArcade
 from arcadepy.types.auth_authorize_params import (
     AuthRequirement,
@@ -18,74 +18,104 @@ from arcadepy.types.auth_authorize_params import (
 from arcadepy.types.shared import AuthorizationResponse
 
 from arcade_serve.mcp.convert import convert_to_mcp_content, create_mcp_tool
-from arcade_serve.mcp.local_auth import MockArcadeClient
+from arcade_serve.mcp.logging import create_mcp_logging_middleware
 from arcade_serve.mcp.message_processor import (
     create_message_processor,
 )
 from arcade_serve.mcp.notification_adapter import MCPNotificationBackend
 from arcade_serve.mcp.notification_manager import (
-    NotificationCapability,
     NotificationManager,
 )
+from arcade_serve.mcp.request_manager import RequestManager
+from arcade_serve.mcp.session import ServerSession
 from arcade_serve.mcp.types import (
+    LATEST_PROTOCOL_VERSION,
     CallToolRequest,
-    CallToolResponse,
     CallToolResult,
-    CancelRequest,
-    DictResult,
+    GetPromptRequest,
+    GetPromptResult,
     Implementation,
     InitializeRequest,
-    InitializeResponse,
     InitializeResult,
     JSONRPCError,
     JSONRPCResponse,
     ListPromptsRequest,
-    ListPromptsResponse,
+    ListPromptsResult,
     ListResourcesRequest,
-    ListResourcesResponse,
+    ListResourcesResult,
+    ListResourceTemplatesRequest,
+    ListResourceTemplatesResult,
     ListToolsRequest,
-    ListToolsResponse,
     ListToolsResult,
     PingRequest,
-    PingResponse,
+    ReadResourceRequest,
+    ReadResourceResult,
     ServerCapabilities,
     SetLevelRequest,
-    SetLevelResponse,
-    ShutdownRequest,
-    ShutdownResponse,
-    SubscribeRequest,
-    SubscribeResponse,
     Tool,
-    UnsubscribeRequest,
-    UnsubscribeResponse,
 )
 
 logger = logging.getLogger("arcade.mcp")
 
-MCP_PROTOCOL_VERSION = "2024-11-05"
+
+class MemoryNotificationBackend:
+    """Minimal backend that captures logs/progress in memory (no transport)."""
+
+    def __init__(self) -> None:
+        self.logs: list[dict[str, Any]] = []
+
+    async def send_log(
+        self,
+        level: LogLevel,
+        message: str,
+        data: Any = None,
+        logger_name: str | None = None,
+    ) -> None:
+        self.logs.append({
+            "level": getattr(level, "value", str(level)),
+            "message": message,
+            "data": data,
+            "logger": logger_name,
+        })
+
+    async def send_progress(
+        self,
+        progress_token: str | int,
+        progress: float,
+        total: float | None = None,
+        message: str | None = None,
+    ) -> None:
+        # No-op for now; can capture if needed
+        return None
+
+    async def send_resource_updated(self, uri: str, timestamp: str | None = None) -> None:
+        return None
+
+    async def send_resource_list_changed(self) -> None:
+        return None
 
 
 class MessageMethod(str, Enum):
-    """Enumeration of supported MCP message methods"""
+    """Enumeration of supported MCP message methods."""
 
     PING = "ping"
     INITIALIZE = "initialize"
     LIST_TOOLS = "tools/list"
     CALL_TOOL = "tools/call"
-    CANCEL = "$/cancelRequest"
-    SHUTDOWN = "shutdown"
     LIST_RESOURCES = "resources/list"
+    LIST_RESOURCE_TEMPLATES = "resources/templates/list"
+    READ_RESOURCE = "resources/read"
     LIST_PROMPTS = "prompts/list"
+    GET_PROMPT = "prompts/get"
     SET_LOG_LEVEL = "logging/setLevel"
-    # Notification subscription methods
-    SUBSCRIBE = "notifications/subscribe"
-    UNSUBSCRIBE = "notifications/unsubscribe"
 
 
 class MCPServer:
-    """
-    Unified async MCP server that manages connections, middleware, and tool invocation.
-    Handles protocol-level messages (ping, initialize, list_tools, call_tool, etc.).
+    """Unified async MCP server.
+
+    - Parses and dispatches JSON-RPC/MCP requests
+    - Manages per-connection sessions, notifications, and server→client requests
+    - Executes @tool functions with a rich ToolContext (logging, progress, auth, client APIs)
     """
 
     def __init__(
@@ -96,102 +126,101 @@ class MCPServer:
         arcade_api_key: str | None = None,
         arcade_api_url: str | None = None,
         enable_logging: bool | None = None,
+        rate_limit_per_min: int = 60,
+        debounce_ms: int = 100,
+        log_level: str = "INFO",
+        server_name: str = "Arcade MCP Server",
+        server_version: str = "0.1.0",
+        server_title: str | None = "Arcade MCP Server",
     ):
-        """
-        Initialize the MCP server.
-
-        Args:
-            catalog: The tool catalog to use
-            auth_disabled: Whether authentication is disabled for this server
-            local_context: Local context configuration from worker.toml
-            arcade_api_key: API key for Arcade (if using real client)
-            arcade_api_url: API URL for Arcade (if using real client)
-            enable_logging: Optional flag to enable or disable extra logging (unused)
-        """
         self.tool_catalog = catalog
         self.auth_disabled = auth_disabled
         self.local_context = local_context or {}
-
-        # Initialize message processor for middleware handling
-        self.message_processor = create_message_processor()
-
-        # Initialize arcade client (real or mock)
+        # Configure logging middleware
+        self.message_processor = create_message_processor(
+            create_mcp_logging_middleware(log_level=log_level)
+        )
         self._init_arcade_client(arcade_api_key, arcade_api_url)
 
-        # Transport-specific write streams for notification delivery
         self.write_streams: dict[str, Any] = {}
-
-        # Per-client log levels
         self.client_log_levels: dict[str, str] = {}
-
-        # Initialize notification manager
         self.notification_manager: NotificationManager | None = None
+        self._notification_rate_limit = rate_limit_per_min
+        self._notification_debounce = debounce_ms
         self._init_notification_manager()
+        # Identity for initialize
+        self._server_name = server_name
+        self._server_version = server_version
+        self._server_title = server_title
+
+        self.sessions: dict[str, ServerSession] = {}
+        self._started = False
 
         self.dispatch_table: dict[str, Callable] = {
             MessageMethod.PING: self._handle_ping,
             MessageMethod.INITIALIZE: self._handle_initialize,
             MessageMethod.LIST_TOOLS: self._handle_list_tools,
             MessageMethod.CALL_TOOL: self._handle_call_tool,
-            MessageMethod.CANCEL: self._handle_cancel,
-            MessageMethod.SHUTDOWN: self._handle_shutdown,
             MessageMethod.LIST_RESOURCES: self._handle_list_resources,
+            MessageMethod.LIST_RESOURCE_TEMPLATES: self._handle_list_resource_templates,
+            MessageMethod.READ_RESOURCE: self._handle_read_resource,
             MessageMethod.LIST_PROMPTS: self._handle_list_prompts,
+            MessageMethod.GET_PROMPT: self._handle_get_prompt,
             MessageMethod.SET_LOG_LEVEL: self._handle_set_log_level,
-            MessageMethod.SUBSCRIBE: self._handle_subscribe,
-            MessageMethod.UNSUBSCRIBE: self._handle_unsubscribe,
         }
 
+    async def start(self) -> None:
+        """Start server-wide managers (notifications). Safe to call multiple times."""
+        if self._started:
+            return
+        if self.notification_manager:
+            await self.notification_manager.start()
+        self._started = True
+
+    async def stop(self) -> None:
+        """Stop server-wide managers (notifications)."""
+        if not self._started:
+            return
+        if self.notification_manager and hasattr(self, "_notification_manager_started"):
+            await self.notification_manager.stop()
+            self._notification_manager_started = False
+        self._started = False
+
     def _init_arcade_client(self, arcade_api_key: str | None, arcade_api_url: str | None) -> None:
-        """
-        Initialize the arcade client (real or mock based on configuration).
+        """Initialize Arcade client for runtime authorization.
 
-        Args:
-            arcade_api_key: API key for real Arcade client
-            arcade_api_url: API URL for real Arcade client
+        Uses AsyncArcade when ARCADE_API_KEY (or explicit key) is present; otherwise
+        leaves the client unset. Tools requiring auth will surface a helpful instruction.
         """
-        # Check if we have local auth providers configured
-        local_auth_providers = self.local_context.get("local_auth_providers")
+        self.arcade: AsyncArcade | None = None
 
-        if local_auth_providers and not arcade_api_key:
-            # Use mock client for local development
-            logger.info("Using mock Arcade client with local auth providers")
-            self.arcade = MockArcadeClient(auth_providers=local_auth_providers)
+        if not arcade_api_key:
+            arcade_api_key = os.environ.get("ARCADE_API_KEY")
+        if not arcade_api_url:
+            arcade_api_url = os.environ.get("ARCADE_API_URL", "https://api.arcade.dev")
+
+        if arcade_api_key:
+            logger.info(f"Using Arcade client with API URL: {arcade_api_url}")
+            self.arcade = AsyncArcade(
+                api_key=arcade_api_key,
+                base_url=arcade_api_url,
+            )
         else:
-            # Use real Arcade client
-            if not arcade_api_key:
-                arcade_api_key = os.environ.get("ARCADE_API_KEY")
-            if not arcade_api_url:
-                arcade_api_url = os.environ.get("ARCADE_API_URL", "https://api.arcade.dev")
-
-            if arcade_api_key:
-                logger.info(f"Using Arcade client with API URL: {arcade_api_url}")
-                self.arcade = AsyncArcade(
-                    api_key=arcade_api_key,
-                    base_url=arcade_api_url,
-                )
-            else:
-                logger.warning(
-                    "No Arcade API key found. Auth-required tools will fail. "
-                    "Set ARCADE_API_KEY to enable auth-required tools."
-                )
-                # Use mock client with no providers as fallback
-                self.arcade = MockArcadeClient()
+            logger.warning(
+                "Arcade API key not configured. Tools requiring auth will return a login instruction."
+            )
 
     def _init_notification_manager(self) -> None:
-        """Initialize the notification manager with self as the sender."""
+        """Create the NotificationManager using server write streams."""
 
-        # Create a NotificationSender that uses the server's write streams
         class ServerNotificationSender:
             def __init__(self, server: "MCPServer"):
                 self.server = server
 
             async def send_notification(self, client_id: str, notification: dict[str, Any]) -> bool:
-                """Send a notification to a specific client."""
                 write_stream = self.server.write_streams.get(client_id)
                 if write_stream:
                     try:
-                        # Ensure each notification is a single NDJSON line
                         message = json.dumps(notification)
                         if not message.endswith("\n"):
                             message += "\n"
@@ -204,8 +233,8 @@ class MCPServer:
 
         self.notification_manager = NotificationManager(
             sender=ServerNotificationSender(self),
-            rate_limit_per_minute=60,
-            default_debounce_ms=100,
+            rate_limit_per_minute=self._notification_rate_limit,
+            default_debounce_ms=self._notification_debounce,
         )
 
     async def run_connection(
@@ -214,21 +243,21 @@ class MCPServer:
         write_stream: Any,
         init_options: Any,
     ) -> None:
-        """
-        Handle a single MCP connection (SSE or stdio).
-
-        Args:
-            read_stream: Async iterable yielding incoming messages.
-            write_stream: Object with an async send(message) method.
-            init_options: Initialization options for the connection.
-        """
-        # Generate a user ID if possible
+        """Run a single MCP connection over the provided read/write streams."""
         user_id = self._get_user_id(init_options)
-
-        # Register write stream for notifications
         self.write_streams[user_id] = write_stream
 
-        # Start notification manager if not already started
+        session = ServerSession(
+            server=self,
+            user_id=user_id,
+            read_stream=read_stream,
+            write_stream=write_stream,
+            init_options=init_options,
+        )
+        self.sessions[user_id] = session
+
+        session._request_manager = RequestManager(write_stream)
+
         if self.notification_manager and not hasattr(self, "_notification_manager_started"):
             await self.notification_manager.start()
             self._notification_manager_started = True
@@ -236,46 +265,29 @@ class MCPServer:
         try:
             logger.info(f"Starting MCP connection for user {user_id}")
 
-            # Register client with notification manager
             if self.notification_manager:
                 await self.notification_manager.register_client(user_id, [])
 
-            async for message in read_stream:
-                # Process the message
-                response = await self.handle_message(message, user_id=user_id)
-
-                # Skip sending responses for None (e.g., notifications)
-                if response is None:
-                    continue
-
-                await self._send_response(write_stream, response)
+            await session.run()
 
         except asyncio.CancelledError:
             logger.info("Connection cancelled")
         except Exception:
             logger.exception("Error in connection")
         finally:
-            # Cleanup on connection close
             if user_id in self.write_streams:
                 del self.write_streams[user_id]
+            if user_id in self.sessions:
+                del self.sessions[user_id]
 
             if self.notification_manager:
                 await self.notification_manager.unregister_client(user_id)
 
     def _get_user_id(self, init_options: Any) -> str:
-        """
-        Get the user ID for a connection.
-
-        Args:
-            init_options: Initialization options for the connection
-
-        Returns:
-            A user ID string
-        """
+        """Resolve a stable user identifier if available, otherwise a UUID."""
         try:
             from arcade_core.config import config
 
-            # Prefer config.user.email if available
             if config.user and config.user.email:
                 return config.user.email
         except ValueError:
@@ -288,98 +300,69 @@ class MCPServer:
             user_id = init_options.get("user_id")
             if user_id:
                 return str(user_id)
-        # Fallback to random UUID
         return str(fallback)
 
     async def _send_response(self, write_stream: Any, response: Any) -> None:
-        """
-        Send a response to the client.
-
-        Args:
-            write_stream: Stream to write the response to
-            response: Response object to send
-        """
-        # Ensure the response is properly serialized to JSON
+        """Serialize and send a response as a single JSON line."""
         if hasattr(response, "model_dump_json"):
-            # It's a Pydantic model, serialize it
             json_response = response.model_dump_json()
-            # Ensure it ends with a newline for JSON-RPC-over-stdio
             if not json_response.endswith("\n"):
                 json_response += "\n"
             logger.debug(f"Sending response: {json_response[:200]}...")
             await write_stream.send(json_response)
         elif isinstance(response, dict):
-            # It's a dict, convert to JSON
-            import json
-
             json_response = json.dumps(response)
-            # Ensure it ends with a newline for JSON-RPC-over-stdio
             if not json_response.endswith("\n"):
                 json_response += "\n"
             logger.debug(f"Sending response: {json_response[:200]}...")
             await write_stream.send(json_response)
         else:
-            # It's already a string or something else
             response_str = str(response)
-            # Ensure it ends with a newline for JSON-RPC-over-stdio
             if not response_str.endswith("\n"):
                 response_str += "\n"
             logger.debug(f"Sending raw response type: {type(response)}")
             await write_stream.send(response_str)
 
-    async def handle_message(self, message: Any, user_id: str | None = None) -> Any:  # noqa: C901
-        """
-        Handle an incoming MCP message. Processes it through middleware and dispatches
-        to the appropriate handler based on the message method.
+    async def handle_message(  # noqa: C901
+        self, message: Any, user_id: str | None = None, session: ServerSession | None = None
+    ) -> Any:
+        """Process an incoming message through middleware and dispatch handlers.
 
-        Args:
-            message: The raw incoming message
-            user_id: Optional user ID for authentication
-
-        Returns:
-            A properly formatted response message
+        Also resolves responses for any in-flight server→client requests (RequestManager).
         """
-        # Pre-process message through middleware
         processed = await self.message_processor.process_request(message)
 
-        # Handle special case for JSON string initialize requests
-        if isinstance(processed, str):
-            try:
-                import json
+        # Resolve client responses to server-initiated requests
+        if (
+            isinstance(processed, dict)
+            and processed.get("jsonrpc") == "2.0"
+            and ("result" in processed or "error" in processed)
+        ):
+            if session:
+                rm = getattr(session, "_request_manager", None)
+                if rm is not None:
+                    try:
+                        await rm.resolve_response(processed)
+                    except Exception:
+                        logger.debug(
+                            "Failed to resolve client response to server-initiated request"
+                        )
+            return None
 
-                parsed = json.loads(processed)
-                if (
-                    isinstance(parsed, dict)
-                    and parsed.get("method") == MessageMethod.INITIALIZE
-                    and "id" in parsed
-                ):
-                    # This is an initialize request
-                    init_response = await self._handle_initialize(
-                        InitializeRequest(**parsed), user_id=user_id
-                    )
-                    return init_response
-            except Exception:
-                logger.exception("Error processing JSON string")
-                # Not parseable JSON, continue with normal processing
-                pass
-
-        # Get method from processed message (handle both dict and object)
         method = None
         if isinstance(processed, dict):
             method = processed.get("method")
         elif hasattr(processed, "method"):
             method = getattr(processed, "method", None)
 
-        # Handle notifications (methods starting with "notifications/")
-        if method and method.startswith("notifications/"):
-            await self._handle_notification(method, processed)
+        # Notifications do not require responses
+        if method and isinstance(method, str) and method.startswith("notifications/"):
+            if method == "notifications/initialized" and session is not None:
+                session.mark_initialized()
             return None
 
-        # Handle regular methods using the dispatch table
         if method in self.dispatch_table:
-            # Convert dict to appropriate request type if needed
             if isinstance(processed, dict):
-                # Convert based on method type
                 if method == MessageMethod.INITIALIZE:
                     processed = InitializeRequest(**processed)
                 elif method == MessageMethod.CALL_TOOL:
@@ -388,151 +371,89 @@ class MCPServer:
                     processed = ListToolsRequest(**processed)
                 elif method == MessageMethod.PING:
                     processed = PingRequest(**processed)
-                elif method == MessageMethod.SUBSCRIBE:
-                    processed = SubscribeRequest(**processed)
-                elif method == MessageMethod.UNSUBSCRIBE:
-                    processed = UnsubscribeRequest(**processed)
                 elif method == MessageMethod.LIST_RESOURCES:
                     processed = ListResourcesRequest(**processed)
+                elif method == MessageMethod.LIST_RESOURCE_TEMPLATES:
+                    processed = ListResourceTemplatesRequest(**processed)
+                elif method == MessageMethod.READ_RESOURCE:
+                    processed = ReadResourceRequest(**processed)
                 elif method == MessageMethod.LIST_PROMPTS:
                     processed = ListPromptsRequest(**processed)
+                elif method == MessageMethod.GET_PROMPT:
+                    processed = GetPromptRequest(**processed)
                 elif method == MessageMethod.SET_LOG_LEVEL:
                     processed = SetLevelRequest(**processed)
-                elif method == MessageMethod.SHUTDOWN:
-                    processed = ShutdownRequest(**processed)
-                elif method == MessageMethod.CANCEL:
-                    processed = CancelRequest(**processed)
 
-            # Methods that need user_id
             if method in [
                 MessageMethod.CALL_TOOL,
                 MessageMethod.INITIALIZE,
-                MessageMethod.SUBSCRIBE,
-                MessageMethod.UNSUBSCRIBE,
             ]:
-                return await self.dispatch_table[method](processed, user_id=user_id)
-            # For other methods, just pass the processed message
+                return await self.dispatch_table[method](
+                    processed, user_id=user_id, session=session
+                )
             return await self.dispatch_table[method](processed)
 
-        # Unknown method
         return JSONRPCError(
-            id=getattr(processed, "id", None)
-            if hasattr(processed, "id")
-            else processed.get("id")
-            if isinstance(processed, dict)
-            else None,
+            id=str(
+                getattr(
+                    processed, "id", processed.get("id") if isinstance(processed, dict) else "0"
+                )
+            ),
             error={
                 "code": -32601,
                 "message": f"Method not found: {method}",
             },
         )
 
-        # If it's not a method request, just pass it through
-        return processed
+    async def shutdown(self) -> None:
+        """Shutdown the server and stop the notification manager."""
+        self._shutdown = True
 
-    async def _handle_notification(self, method: str, message: Any) -> None:
-        """
-        Handle notification messages.
+        if self.notification_manager and hasattr(self, "_notification_manager_started"):
+            await self.notification_manager.stop()
+            self._notification_manager_started = False
 
-        Args:
-            method: The notification method
-            message: The notification message
-        """
-        if method == "notifications/cancelled":
-            logger.info(f"Request cancelled: {getattr(message, 'params', {})}")
-        else:
-            logger.debug(f"Received notification: {method}")
+        logger.info("MCP server shutdown complete")
 
-    async def _handle_ping(self, message: PingRequest) -> PingResponse:
-        """
-        Handle a ping request and return a pong response.
-
-        Args:
-            message: The ping request
-
-        Returns:
-            A properly formatted pong response
-        """
-        return PingResponse(id=message.id or 0)
+    async def _handle_ping(self, message: PingRequest) -> JSONRPCResponse[Any]:
+        """Respond to ping with an empty result."""
+        return JSONRPCResponse(id=message.id, result={})
 
     async def _handle_initialize(
-        self, message: InitializeRequest, user_id: str | None = None
-    ) -> InitializeResponse:
-        """
-        Handle an initialize request and return a proper initialize response.
+        self,
+        message: InitializeRequest,
+        user_id: str | None = None,
+        session: ServerSession | None = None,
+    ) -> JSONRPCResponse[InitializeResult]:
+        """Return server capabilities and negotiated protocol version."""
+        if session is not None:
+            session.set_client_params(message.params)
 
-        Args:
-            message: The initialize request
-            user_id: Optional user ID for the connection
-
-        Returns:
-            A properly formatted initialize response
-        """
-        # Extract client capabilities from the request
-        client_capabilities = []
-        if message.params and "capabilities" in message.params:
-            client_caps = message.params["capabilities"]
-            if isinstance(client_caps, dict) and "notifications" in client_caps:
-                notifications = client_caps["notifications"]
-                if isinstance(notifications, dict):
-                    for method, enabled in notifications.items():
-                        if enabled:
-                            client_capabilities.append(NotificationCapability(method=method))
-
-        # Register client capabilities with notification manager
-        if self.notification_manager and user_id:
-            # Update client with their notification capabilities
-            async with self.notification_manager.clients_lock:
-                if user_id in self.notification_manager.clients:
-                    self.notification_manager.clients[user_id].capabilities = client_capabilities
-
-        # Create the result data with notification support
         result = InitializeResult(
-            protocolVersion=MCP_PROTOCOL_VERSION,
+            protocolVersion=LATEST_PROTOCOL_VERSION,
             capabilities=ServerCapabilities(
-                tools={"listChanged": True},  # Server supports tool change notifications
-                logging={},  # Server supports logging
-                # Add notification capabilities
-                notifications={
-                    "progress": True,
-                    "message": True,
-                    "resources": {
-                        "listChanged": True,
-                        "updated": True,
-                    },
-                    "tools": {
-                        "listChanged": True,
-                    },
-                },
+                tools={"listChanged": True},
+                logging={},
+                prompts={"listChanged": True},
+                resources={"listChanged": True, "subscribe": True},
             ),
             serverInfo=Implementation(
-                name="Arcade MCP Worker",
-                version="0.1.0",
-                title="Arcade Model Context Protocol Worker",
+                name=self._server_name,
+                version=self._server_version,
+                title=self._server_title,
             ),
-            instructions="The Arcade MCP Worker provides access to tools defined in Arcade toolkits. Use 'tools/list' to see available tools and 'tools/call' to execute them. This server supports notifications for progress tracking, messages, and resource/tool updates.",
+            instructions=(
+                "The Arcade MCP Server provides access to tools defined in Arcade toolkits. "
+                "Use 'tools/list' to see available tools and 'tools/call' to execute them."
+            ),
         )
-
-        # Construct proper response with result field
-        response = InitializeResponse(id=message.id or 0, result=result)
-
-        logger.debug(f"Initialize response: {response.model_dump_json()}")
-        return response
+        return JSONRPCResponse(id=message.id, result=result)
 
     async def _handle_list_tools(
         self, message: ListToolsRequest
-    ) -> Union[ListToolsResponse, JSONRPCError]:
-        """
-        Handle a tools/list request and return a list of available tools.
-
-        Args:
-            message: The tools/list request
-
-        Returns:
-            A properly formatted tools/list response or error
-        """
+    ) -> JSONRPCResponse[ListToolsResult] | JSONRPCError:
+        """Return available tools as Tool objects (input/output schemas, annotations)."""
         try:
-            # Get all tools from the catalog
             tools = []
             tool_conversion_errors = []
 
@@ -546,17 +467,14 @@ class MCPServer:
                     logger.exception(f"Error converting tool: {tool_name}")
                     tool_conversion_errors.append(tool_name)
 
-            # Log summary if we had errors
             if tool_conversion_errors:
                 logger.warning(
                     f"Failed to convert {len(tool_conversion_errors)} tools: {tool_conversion_errors}"
                 )
 
-            # Create tool objects with exception handling for each one
             tool_objects = []
             for t in tools:
                 try:
-                    # Make input schema optional if missing
                     tool_dict = dict(t)
                     if "inputSchema" not in tool_dict:
                         tool_dict["inputSchema"] = {
@@ -568,11 +486,8 @@ class MCPServer:
                 except Exception:
                     logger.exception(f"Error creating Tool object for {t.get('name', 'unknown')}")
 
-            # For now, we don't implement pagination, so return all tools
-            # and don't set nextCursor
             result = ListToolsResult(tools=tool_objects)
-            response = ListToolsResponse(id=message.id or 0, result=result)
-
+            response = JSONRPCResponse(id=message.id, result=result)
         except Exception:
             logger.exception("Error listing tools")
             return JSONRPCError(
@@ -585,420 +500,228 @@ class MCPServer:
         return response
 
     async def _handle_call_tool(  # noqa: C901
-        self, message: CallToolRequest, user_id: str | None = None
-    ) -> CallToolResponse:
+        self,
+        message: CallToolRequest,
+        user_id: str | None = None,
+        session: ServerSession | None = None,
+    ) -> JSONRPCResponse[CallToolResult]:
+        """Execute a tool and return an MCP-compliant CallToolResult.
+
+        Injects secrets and runtime authorization (via Arcade) as needed.
+        Provides logging/progress and server→client MCP features through ToolContext.
         """
-        Handle a tools/call request to execute a tool.
+        tool_name: str = message.params.name
+        input_params: dict[str, Any] = message.params.arguments or {}
 
-        Args:
-            message: The tools/call request
-            user_id: Optional user ID for authentication
+        tool_context = ToolContext()
+        self._apply_local_context(tool_context, user_id)
 
-        Returns:
-            A properly formatted tools/call response
-        """
-        tool_name: str = message.params["name"]
-        # According to MCP spec, arguments come in params.arguments
-        input_params: dict[str, Any] = message.params.get("arguments", {})
+        if session and hasattr(session, "_request_manager"):
 
-        # Extract progress token from request metadata if present
+            async def _sender(
+                method: str, params: dict[str, Any] | None, timeout: float | None
+            ) -> Any:
+                # resolve attribute safely
+                rm = getattr(session, "_request_manager", None)
+                if rm is None:
+                    raise RuntimeError("Request manager unavailable")
+                return await rm.send_request(method, params, timeout)
+
+            tool_context.set_client_request_api(_sender)
+
         progress_token = None
-        if hasattr(message, "get_progress_token"):
-            progress_token = message.get_progress_token()
-        elif message.params and "_meta" in message.params:
-            meta = message.params["_meta"]
+        if message.params and isinstance(message.params, dict):
+            meta = message.params.get("_meta") if isinstance(message.params, dict) else None
             if isinstance(meta, dict) and "progressToken" in meta:
                 progress_token = meta["progressToken"]
 
-        logger.info(f"Handling tool call for {tool_name}")
+        if progress_token:
+            tool_context.progress_token = progress_token
+
+        # Track memory backend for streamable-http so we can embed logs
+        memory_backend: MemoryNotificationBackend | None = None
+
+        if self.notification_manager and user_id:
+            min_log_level = self.client_log_levels.get(user_id, "info")
+
+            backend = MCPNotificationBackend(
+                self.notification_manager, user_id, min_log_level=min_log_level
+            )
+            logger_instance = create_tool_logger(backend, tool_name)
+            notifier_instance = create_tool_notifier(backend, progress_token)
+            tool_context.set_notification_support(
+                logger_instance,
+                cast(Any, notifier_instance),
+            )
+            tool_context.set_min_log_level(min_log_level)
+        else:
+            # Fallback: capture logs locally so they can be embedded in the response
+            memory_backend = MemoryNotificationBackend()
+            logger_instance = create_tool_logger(memory_backend, tool_name)
+            notifier_instance = create_tool_notifier(memory_backend, progress_token)
+            tool_context.set_notification_support(
+                logger_instance,
+                cast(Any, notifier_instance),
+            )
 
         try:
             tool = self.tool_catalog.get_tool_by_name(tool_name, separator="_")
+        except Exception:
+            return JSONRPCResponse(
+                id=message.id,
+                result=CallToolResult(
+                    content=[{"type": "text", "text": f"Unknown tool: {tool_name}"}], isError=True
+                ),
+            )
 
-            # Create tool context
-            tool_context = ToolContext()
+        if tool.definition.requirements and tool.definition.requirements.secrets:
+            self._setup_tool_secrets(tool, tool_context)
 
-            # Apply local context from worker.toml or environment
-            self._apply_local_context(tool_context, user_id)
-
-            # Set progress token if provided
-            if progress_token:
-                tool_context.progress_token = progress_token
-
-            # Add notification support if available
-            if self.notification_manager and user_id:
-                # Get client's log level (default to info)
-                min_log_level = self.client_log_levels.get(user_id, "info")
-
-                backend = MCPNotificationBackend(
-                    self.notification_manager, user_id, min_log_level=min_log_level
-                )
-                logger_instance = create_tool_logger(backend, tool_name)
-                notifier_instance = create_tool_notifier(backend, progress_token)
-                tool_context.set_notification_support(logger_instance, notifier_instance)
-                tool_context.set_min_log_level(min_log_level)
-
-            # Set up context with secrets
-            if tool.definition.requirements and tool.definition.requirements.secrets:
-                self._setup_tool_secrets(tool, tool_context)
-
-            # Handle authorization if needed
-            requirement = self._get_auth_requirement(tool)
-            if requirement and not self.auth_disabled:
-                # Use the arcade client (real or mock) for authorization
+        requirement = self._get_auth_requirement(tool)
+        if requirement and not self.auth_disabled:
+            try:
                 auth_result = await self._check_authorization(
                     requirement, user_id=user_id or self.local_context.get("user_id")
                 )
-                if auth_result.status != "completed":
-                    return CallToolResponse(
-                        id=message.id or 0,
-                        result=CallToolResult(content=[{"type": "text", "text": auth_result.url}]),
-                    )
-                else:
-                    tool_context.authorization = ToolAuthorizationContext(
-                        token=auth_result.context.token if auth_result.context else None,
-                        user_info={"user_id": user_id} if user_id else {},
-                    )
-
-            # Execute the tool
-            logger.debug(f"Executing tool {tool_name} with input: {input_params}")
-            result = await ToolExecutor.run(
-                func=tool.tool,
-                definition=tool.definition,
-                input_model=tool.input_model,
-                output_model=tool.output_model,
-                context=tool_context,
-                **input_params,
-            )
-            logger.debug(f"Tool result: {result}")
-            if result.value is not None or (result.value is not None and not result.error):
-                # Handle structured content for dict/list values
-                structured_content = None
-
-                # Determine if the tool declared an output schema (clients expect structuredContent)
-                require_structured = bool(
-                    getattr(tool.definition, "output", None)
-                    and getattr(tool.definition.output, "value_schema", None) is not None
+            except Exception:
+                hint = (
+                    "Authorization required but Arcade is not configured. "
+                    "Run 'arcade login' or set ARCADE_API_KEY to enable auth-required tools."
+                )
+                return JSONRPCResponse(
+                    id=message.id,
+                    result=CallToolResult(content=[{"type": "text", "text": hint}], isError=True),
                 )
 
-                # If the value is a dict, also provide it as structured content
-                if isinstance(result.value, dict):
-                    structured_content = result.value
-                elif require_structured:
-                    # Wrap non-dict results to satisfy clients expecting an object
-                    structured_content = {"result": result.value}
-
-                # Build unstructured content text. If we have structured content, ensure a
-                # matching text block exists so validators can correlate both representations.
-                if structured_content is not None:
-                    try:
-                        content = [{"type": "text", "text": json.dumps(structured_content)}]
-                    except Exception:
-                        content = convert_to_mcp_content(result.value)
-                else:
-                    content = convert_to_mcp_content(result.value)
-
-                response = CallToolResponse(
-                    id=message.id or 0,
-                    result=CallToolResult(
-                        content=content,
-                        structuredContent=structured_content,
-                        isError=False,
-                    ),
+            if auth_result.status != "completed":
+                return JSONRPCResponse(
+                    id=message.id,
+                    result=CallToolResult(content=[{"type": "text", "text": auth_result.url}]),
                 )
-
-                # Include logs if any
-                if result.logs:
-                    for log in result.logs:
-                        logger.log(
-                            getattr(logging, log.level.upper(), logging.INFO),
-                            f"Tool log: {log.message}",
-                        )
-
-                return response
             else:
-                error = result.error or "Error calling tool"
-                logger.error(f"Tool {tool_name} returned error: {error}")
-                return CallToolResponse(
-                    id=message.id or 0,
-                    result=CallToolResult(
-                        content=[{"type": "text", "text": str(error)}], isError=True
-                    ),
+                tool_context.authorization = ToolAuthorizationContext(
+                    token=auth_result.context.token if auth_result.context else None,
+                    user_info={"user_id": user_id} if user_id else {},
                 )
-        except Exception as e:
-            logger.exception(f"Error calling tool {tool_name}")
-            error_msg = f"Error calling tool {tool_name}: {e!s}"
-            return CallToolResponse(
-                id=message.id or 0,
-                result=CallToolResult(content=[{"type": "text", "text": error_msg}], isError=True),
+
+        result = await ToolExecutor.run(
+            func=tool.tool,
+            definition=tool.definition,
+            input_model=tool.input_model,
+            output_model=tool.output_model,
+            context=tool_context,
+            **input_params,
+        )
+
+        # Prepare logs for embedding into _meta
+        meta_logs: list[dict[str, Any]] | None = None
+        if result.logs:
+            try:
+                meta_logs = [
+                    {
+                        "level": getattr(log, "level", None),
+                        "message": getattr(log, "message", None),
+                    }
+                    for log in result.logs
+                ]
+            except Exception:
+                # Best effort; do not fail call if logs cannot be serialized
+                meta_logs = None
+        elif memory_backend and memory_backend.logs:
+            # Fallback to captured memory logs when executor didn't provide logs
+            meta_logs = memory_backend.logs
+
+        if result.value is not None or (result.value is not None and not result.error):
+            structured_content: dict[str, Any] | None = None
+
+            require_structured = bool(
+                getattr(tool.definition, "output", None)
+                and getattr(tool.definition.output, "value_schema", None) is not None
+            )
+
+            if isinstance(result.value, dict):
+                structured_content = result.value.copy()
+            elif require_structured:
+                structured_content = {"result": result.value}
+
+            # Ensure logs are visible to clients that don't render _meta
+            if meta_logs:
+                if structured_content is None:
+                    structured_content = {"result": result.value}
+                structured_content["logs"] = meta_logs
+
+            if structured_content is not None:
+                try:
+                    content = [{"type": "text", "text": json.dumps(structured_content)}]
+                except Exception:
+                    content = convert_to_mcp_content(result.value)
+            else:
+                content = convert_to_mcp_content(result.value)
+
+            response = JSONRPCResponse(
+                id=message.id,
+                result=CallToolResult(
+                    content=content,
+                    structuredContent=structured_content,
+                    isError=False,
+                    **({"_meta": {"logs": meta_logs}} if meta_logs else {}),
+                ),
+            )
+
+            if result.logs:
+                for log in result.logs:
+                    logger.log(
+                        getattr(logging, log.level.upper(), logging.INFO),
+                        f"Tool log: {log.message}",
+                    )
+
+            return response
+        else:
+            error = result.error or "Error calling tool"
+            logger.error(f"Tool {tool_name} returned error: {error}")
+            return JSONRPCResponse(
+                id=message.id,
+                result=CallToolResult(
+                    content=[{"type": "text", "text": str(error)}],
+                    isError=True,
+                    **({"_meta": {"logs": meta_logs}} if meta_logs else {}),
+                ),
             )
 
     def _setup_tool_secrets(self, tool: Any, tool_context: ToolContext) -> None:
-        """
-        Set up tool secrets in the tool context.
-
-        Args:
-            tool: The tool to set up secrets for
-            tool_context: The tool context to update
-        """
+        """Inject environment-provided secrets required by the tool."""
         for secret in tool.definition.requirements.secrets:
             value = os.environ.get(secret.key)
             if value is not None:
                 tool_context.set_secret(secret.key, value)
 
     def _apply_local_context(self, tool_context: ToolContext, user_id: str | None = None) -> None:
-        """
-        Apply local context configuration to the tool context.
-
-        This method sets up user IDs and metadata for local development.
-        Priority order:
-        1. Environment variables (ARCADE_USER_ID, ARCADE_USER_EMAIL, etc.)
-        2. worker.toml local_context configuration
-        3. Method parameters
-
-        Args:
-            tool_context: The tool context to update
-            user_id: Optional user ID passed from the request
-        """
-        # Set user_id (priority: parameter > env > config)
+        """Apply environment/local metadata to ToolContext (user_id, email, etc.)."""
         final_user_id = (
             user_id or os.environ.get("ARCADE_USER_ID") or self.local_context.get("user_id")
         )
         if final_user_id:
             tool_context.user_id = final_user_id
 
-        # Additional metadata from environment
         if os.environ.get("ARCADE_USER_EMAIL"):
             if not tool_context.metadata:
                 tool_context.metadata = []
             tool_context.metadata.append(
-                ToolMetadataItem(key="user_email", value=os.environ.get("ARCADE_USER_EMAIL"))
+                ToolMetadataItem(
+                    key="user_email", value=str(os.environ.get("ARCADE_USER_EMAIL") or "")
+                )
             )
 
-        # Apply any additional metadata from local_context
         local_metadata = self.local_context.get("metadata", {})
         for key, value in local_metadata.items():
             if not tool_context.metadata:
                 tool_context.metadata = []
-            # Check if metadata key already exists
             existing = next((m for m in tool_context.metadata if m.key == key), None)
             if not existing:
                 tool_context.metadata.append(ToolMetadataItem(key=key, value=str(value)))
 
-    async def _handle_cancel(self, message: CancelRequest) -> JSONRPCResponse:
-        """
-        Handle a cancel request.
-
-        Args:
-            message: The cancel request
-
-        Returns:
-            A response acknowledging the cancellation
-        """
-        return JSONRPCResponse(id=message.id or 0, result={"ok": True})
-
-    async def _handle_shutdown(self, message: ShutdownRequest) -> ShutdownResponse:
-        """
-        Handle a shutdown request.
-
-        Args:
-            message: The shutdown request
-
-        Returns:
-            A response acknowledging the shutdown request
-        """
-        # Schedule a task to shutdown the server after sending the response
-        proc = asyncio.create_task(self.shutdown())
-        proc.add_done_callback(lambda _: logger.info("MCP server shutdown complete"))
-        return ShutdownResponse(id=message.id or 0, result={"ok": True})
-
-    async def _handle_list_resources(self, message: ListResourcesRequest) -> ListResourcesResponse:
-        """
-        Handle a resources/list request.
-
-        Args:
-            message: The resources/list request
-
-        Returns:
-            A properly formatted resources/list response
-        """
-        return ListResourcesResponse(id=message.id or 0, result=DictResult(data={"resources": []}))
-
-    async def _handle_list_prompts(self, message: ListPromptsRequest) -> ListPromptsResponse:
-        """
-        Handle a prompts/list request.
-
-        Args:
-            message: The prompts/list request
-
-        Returns:
-            A properly formatted prompts/list response
-        """
-        return ListPromptsResponse(id=message.id or 0, result=DictResult(data={"prompts": []}))
-
-    async def _handle_set_log_level(
-        self, message: SetLevelRequest, user_id: str | None = None
-    ) -> SetLevelResponse:
-        """
-        Handle a logging/setLevel request.
-
-        Args:
-            message: The logging/setLevel request
-            user_id: Optional user ID for this connection
-
-        Returns:
-            A response acknowledging the log level change
-        """
-        level = message.params.get("level")
-        if level is None:
-            return SetLevelResponse(id=message.id or 0, result={})
-
-        # Store the log level for this client
-        if user_id:
-            self.client_log_levels[user_id] = level.lower()
-
-        # Map MCP log levels to Python log levels
-        level_mapping = {
-            "debug": logging.DEBUG,
-            "info": logging.INFO,
-            "notice": logging.INFO,  # Python doesn't have notice, map to info
-            "warning": logging.WARNING,
-            "error": logging.ERROR,
-            "critical": logging.CRITICAL,
-            "alert": logging.CRITICAL,  # Python doesn't have alert, map to critical
-            "emergency": logging.CRITICAL,  # Python doesn't have emergency, map to critical
-        }
-
-        numeric_level = level_mapping.get(level.lower())
-        if numeric_level is None:
-            # Invalid level, but we still return success per spec
-            return SetLevelResponse(id=message.id or 0, result={})
-
-        logger.setLevel(numeric_level)
-        logger.info(f"Log level set to {level}")
-        return SetLevelResponse(id=message.id or 0, result=DictResult(data={"ok": True}))
-
-    async def _handle_subscribe(
-        self, message: SubscribeRequest, user_id: str | None = None
-    ) -> Union[SubscribeResponse, JSONRPCError]:
-        """
-        Handle a notification subscription request.
-
-        Args:
-            message: The subscribe request
-            user_id: Optional user ID for the connection
-
-        Returns:
-            A subscribe response or error
-        """
-        if not self.notification_manager or not user_id:
-            return JSONRPCError(
-                id=message.id,
-                error={
-                    "code": -32603,
-                    "message": "Notifications not supported or client not registered",
-                },
-            )
-
-        try:
-            # Extract notification types from params
-            notification_types = []
-            if message.params and "types" in message.params:
-                types = message.params["types"]
-                if isinstance(types, list):
-                    notification_types = types
-
-            # Subscribe the client
-            subscriptions = await self.notification_manager.subscribe(
-                user_id,
-                notification_types,
-                filters=message.params.get("filters") if message.params else None,
-            )
-
-            # Return response with subscriptions
-            result: dict[str, Any] = {
-                "subscriptions": [sub.model_dump(exclude_none=True) for sub in subscriptions]
-            }
-            return SubscribeResponse(id=message.id or 0, result=result)
-
-        except ValueError as e:
-            return JSONRPCError(
-                id=message.id,
-                error={
-                    "code": -32602,
-                    "message": str(e),
-                },
-            )
-        except Exception as e:
-            logger.exception("Error handling subscribe request")
-            return JSONRPCError(
-                id=message.id,
-                error={
-                    "code": -32603,
-                    "message": f"Failed to subscribe: {e!s}",
-                },
-            )
-
-    async def _handle_unsubscribe(
-        self, message: UnsubscribeRequest, user_id: str | None = None
-    ) -> Union[UnsubscribeResponse, JSONRPCError]:
-        """
-        Handle a notification unsubscription request.
-
-        Args:
-            message: The unsubscribe request
-            user_id: Optional user ID for the connection
-
-        Returns:
-            An unsubscribe response or error
-        """
-        if not self.notification_manager or not user_id:
-            return JSONRPCError(
-                id=message.id,
-                error={
-                    "code": -32603,
-                    "message": "Notifications not supported or client not registered",
-                },
-            )
-
-        try:
-            # Extract subscription IDs from params
-            subscription_ids = []
-            if message.params and "subscription_ids" in message.params:
-                ids = message.params["subscription_ids"]
-                if isinstance(ids, list):
-                    subscription_ids = ids
-
-            # Unsubscribe the client
-            success = await self.notification_manager.unsubscribe(
-                user_id,
-                subscription_ids,
-            )
-
-            # Return response
-            result: dict[str, Any] = {"success": success}
-            return UnsubscribeResponse(id=message.id or 0, result=result)
-
-        except Exception as e:
-            logger.exception("Error handling unsubscribe request")
-            return JSONRPCError(
-                id=message.id,
-                error={
-                    "code": -32603,
-                    "message": f"Failed to unsubscribe: {e!s}",
-                },
-            )
-
     def _get_auth_requirement(self, tool: MaterializedTool) -> AuthRequirement | None:
-        """
-        Get the authentication requirement for a tool.
-
-        Args:
-            tool: The tool to get the requirement for
-
-        Returns:
-            An authentication requirement or None if not required
-        """
+        """Build an AuthRequirement for the tool if it declares authorization."""
         req = tool.definition.requirements.authorization
         if not req:
             return None
@@ -1018,20 +741,9 @@ class MCPServer:
     async def _check_authorization(
         self, auth_requirement: AuthRequirement, user_id: str | None = None
     ) -> AuthorizationResponse:
-        """
-        Check if a tool is authorized for a user.
-
-        Args:
-            tool: The tool to check authorization for
-            user_id: The user ID to check authorization for
-
-        Returns:
-            An authorization response
-
-        Raises:
-            RuntimeError: If the tool has no authorization requirement
-            Exception: If authorization fails
-        """
+        """Authorize a tool at runtime using Arcade Cloud."""
+        if self.arcade is None:
+            raise RuntimeError("Arcade client not configured")
         try:
             response = await self.arcade.auth.authorize(
                 auth_requirement=auth_requirement,
@@ -1044,13 +756,55 @@ class MCPServer:
             raise
         return response
 
-    async def shutdown(self) -> None:
-        """Shutdown the server."""
-        self._shutdown = True
+    async def _handle_set_log_level(self, message: SetLevelRequest) -> JSONRPCResponse[Any]:
+        """Set server log level (affects 'arcade.mcp' logger)."""
+        try:
+            level_name = str(
+                message.params.level.value
+                if hasattr(message.params.level, "value")
+                else message.params.level
+            )
+            logger.setLevel(getattr(logging, level_name.upper(), logging.INFO))
+        except Exception:
+            # If anything goes wrong, default to INFO
+            logger.setLevel(logging.INFO)
+        return JSONRPCResponse(id=message.id, result={})
 
-        # Stop notification manager
-        if self.notification_manager and hasattr(self, "_notification_manager_started"):
-            await self.notification_manager.stop()
-            self._notification_manager_started = False
+    # -------------------------------------------------------------------------
+    # Stub handlers for resources, and prompts (TODO: implement)
+    # -------------------------------------------------------------------------
 
-        logger.info("MCP server shutdown complete")
+    async def _handle_list_resources(
+        self, message: ListResourcesRequest
+    ) -> JSONRPCResponse[ListResourcesResult]:
+        """List available resources (stubbed: returns empty list)."""
+        result = ListResourcesResult(resources=[])
+        return JSONRPCResponse(id=message.id, result=result)
+
+    async def _handle_list_resource_templates(
+        self, message: ListResourceTemplatesRequest
+    ) -> JSONRPCResponse[ListResourceTemplatesResult]:
+        """List available resource templates (stubbed: returns empty list)."""
+        result = ListResourceTemplatesResult(resourceTemplates=[])
+        return JSONRPCResponse(id=message.id, result=result)
+
+    async def _handle_read_resource(
+        self, message: ReadResourceRequest
+    ) -> JSONRPCResponse[ReadResourceResult]:
+        """Read a resource by URI (stubbed: returns empty contents)."""
+        result = ReadResourceResult(contents=[])
+        return JSONRPCResponse(id=message.id, result=result)
+
+    async def _handle_list_prompts(
+        self, message: ListPromptsRequest
+    ) -> JSONRPCResponse[ListPromptsResult]:
+        """List available prompts (stubbed: returns empty list)."""
+        result = ListPromptsResult(prompts=[])
+        return JSONRPCResponse(id=message.id, result=result)
+
+    async def _handle_get_prompt(
+        self, message: GetPromptRequest
+    ) -> JSONRPCResponse[GetPromptResult]:
+        """Get a prompt by name (stubbed: returns empty messages)."""
+        result = GetPromptResult(description=None, messages=[])
+        return JSONRPCResponse(id=message.id, result=result)

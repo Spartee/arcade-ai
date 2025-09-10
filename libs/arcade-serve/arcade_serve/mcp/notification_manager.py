@@ -14,23 +14,15 @@ from logging import getLogger
 from typing import Any, Protocol
 
 from arcade_serve.mcp.types import (
-    CancelledNotification,
-    CancelledNotificationParams,
-    EnhancedProgressNotification,
-    EnhancedProgressNotificationParams,
+    JSONRPCMessage,
     LoggingMessageNotification,
-    LoggingMessageNotificationParams,
-    LogLevel,
-    Notification,
-    NotificationCapability,
-    NotificationSubscription,
-    ProgressToken,
+    LoggingMessageParams,
+    ProgressNotification,
+    ProgressNotificationParams,
     ResourceListChangedNotification,
-    ResourceListChangedNotificationParams,
     ResourceUpdatedNotification,
     ResourceUpdatedNotificationParams,
     ToolListChangedNotification,
-    ToolListChangedNotificationParams,
 )
 
 logger = getLogger("arcade.mcp.notifications")
@@ -69,8 +61,8 @@ class NotificationClient:
     """Represents a connected client with notification capabilities."""
 
     client_id: str
-    capabilities: list[NotificationCapability]
-    subscriptions: dict[str, NotificationSubscription] = field(default_factory=dict)
+    capabilities: list[str]
+    subscriptions: dict[str, str] = field(default_factory=dict)
     last_notification: float = field(default_factory=time.time)
     notification_count: int = 0
     rate_limit_window_start: float = field(default_factory=time.time)
@@ -81,7 +73,7 @@ class NotificationClient:
 class DebouncedNotification:
     """Represents a debounced notification waiting to be sent."""
 
-    notification: Notification
+    notification: JSONRPCMessage
     clients: set[str]
     created_at: float
     send_after: float
@@ -154,7 +146,7 @@ class NotificationManager:
     async def register_client(
         self,
         client_id: str,
-        capabilities: list[NotificationCapability] | None = None,
+        capabilities: list[str] | None = None,
     ) -> None:
         """
         Register a new client for notifications.
@@ -189,17 +181,11 @@ class NotificationManager:
         client_id: str,
         notification_types: list[str],
         filters: dict[str, Any] | None = None,
-    ) -> list[NotificationSubscription]:
+    ) -> list[dict[str, Any]]:
         """
         Subscribe a client to notification types.
 
-        Args:
-            client_id: Client identifier
-            notification_types: List of notification methods to subscribe to
-            filters: Optional filters for notifications
-
-        Returns:
-            List of created subscriptions
+        Returns list of minimal subscription dicts.
         """
         async with self.clients_lock:
             client = self.clients.get(client_id)
@@ -209,16 +195,15 @@ class NotificationManager:
             subscriptions = []
             for notification_type in notification_types:
                 # Check if client has capability for this notification type
-                if any(cap.method == notification_type for cap in client.capabilities):
+                if notification_type in client.capabilities:
                     subscription_id = str(uuid.uuid4())
-                    subscription = NotificationSubscription(
-                        subscription_id=subscription_id,
-                        method=notification_type,
-                        created_at=time.time(),
-                        filters=filters,
-                    )
-                    client.subscriptions[subscription_id] = subscription
-                    subscriptions.append(subscription)
+                    client.subscriptions[subscription_id] = notification_type
+                    subscriptions.append({
+                        "subscription_id": subscription_id,
+                        "method": notification_type,
+                        "created_at": time.time(),
+                        "filters": filters,
+                    })
                     logger.debug(f"Client {client_id} subscribed to {notification_type}")
                 else:
                     logger.warning(f"Client {client_id} lacks capability for {notification_type}")
@@ -226,16 +211,7 @@ class NotificationManager:
             return subscriptions
 
     async def unsubscribe(self, client_id: str, subscription_ids: list[str]) -> bool:
-        """
-        Unsubscribe a client from specific subscriptions.
-
-        Args:
-            client_id: Client identifier
-            subscription_ids: List of subscription IDs to remove
-
-        Returns:
-            True if all unsubscriptions were successful
-        """
+        """Unsubscribe a client from specific subscriptions."""
         async with self.clients_lock:
             client = self.clients.get(client_id)
             if not client:
@@ -253,7 +229,7 @@ class NotificationManager:
 
     async def notify_progress(
         self,
-        progress_token: ProgressToken,
+        progress_token: str | int,
         progress: float,
         total: float | None = None,
         message: str | None = None,
@@ -261,28 +237,11 @@ class NotificationManager:
         debounce_key: str | None = None,
         debounce_ms: int | None = None,
     ) -> None:
-        """
-        Send a progress notification.
-
-        Args:
-            progress_token: Unique token identifying the operation
-            progress: Progress value (0.0 to 1.0)
-            total: Optional total value
-            message: Optional progress message
-            client_ids: Specific clients to notify (None for all subscribed)
-            debounce_key: Key for debouncing (uses progress_token if None)
-            debounce_ms: Debounce time in ms (uses default if None)
-        """
-        notification = EnhancedProgressNotification(
-            method="notifications/progress",
-            params=EnhancedProgressNotificationParams(
-                progressToken=progress_token,
-                progress=progress,
-                total=total,
-                message=message,
-            ),
+        notification = ProgressNotification(
+            params=ProgressNotificationParams(
+                progressToken=progress_token, progress=progress, total=total, message=message
+            )
         )
-
         await self._send_notification(
             notification,
             NotificationType.PROGRESS,
@@ -293,30 +252,14 @@ class NotificationManager:
 
     async def notify_message(
         self,
-        level: LogLevel,
+        level: Any,
         data: Any,
         logger_name: str | None = None,
         client_ids: list[str] | None = None,
     ) -> None:
-        """
-        Send a log/message notification.
-
-        Args:
-            level: Log level
-            data: Log data/message
-            logger_name: Optional logger name
-            client_ids: Specific clients to notify (None for all subscribed)
-        """
         notification = LoggingMessageNotification(
-            method="notifications/message",
-            params=LoggingMessageNotificationParams(
-                level=level,
-                data=data,
-                logger=logger_name,
-            ),
+            params=LoggingMessageParams(level=level, data=data, logger=logger_name)
         )
-
-        # Don't debounce log messages
         await self._send_notification(
             notification,
             NotificationType.MESSAGE,
@@ -332,24 +275,9 @@ class NotificationManager:
         debounce_key: str | None = None,
         debounce_ms: int | None = None,
     ) -> None:
-        """
-        Send a resource updated notification.
-
-        Args:
-            uri: Resource URI that was updated
-            timestamp: Optional update timestamp
-            client_ids: Specific clients to notify (None for all subscribed)
-            debounce_key: Key for debouncing (uses uri if None)
-            debounce_ms: Debounce time in ms (uses default if None)
-        """
         notification = ResourceUpdatedNotification(
-            method="notifications/resources/updated",
-            params=ResourceUpdatedNotificationParams(
-                uri=uri,
-                timestamp=timestamp,
-            ),
+            params=ResourceUpdatedNotificationParams(uri=uri)
         )
-
         await self._send_notification(
             notification,
             NotificationType.RESOURCE_UPDATED,
@@ -362,17 +290,7 @@ class NotificationManager:
         self,
         client_ids: list[str] | None = None,
     ) -> None:
-        """
-        Send a resource list changed notification.
-
-        Args:
-            client_ids: Specific clients to notify (None for all subscribed)
-        """
-        notification = ResourceListChangedNotification(
-            method="notifications/resources/list_changed",
-            params=ResourceListChangedNotificationParams(),
-        )
-
+        notification = ResourceListChangedNotification()
         await self._send_notification(
             notification,
             NotificationType.RESOURCE_LIST_CHANGED,
@@ -383,86 +301,28 @@ class NotificationManager:
         self,
         client_ids: list[str] | None = None,
     ) -> None:
-        """
-        Send a tool list changed notification.
-
-        Args:
-            client_ids: Specific clients to notify (None for all subscribed)
-        """
-        notification = ToolListChangedNotification(
-            method="notifications/tools/list_changed",
-            params=ToolListChangedNotificationParams(),
-        )
-
+        notification = ToolListChangedNotification()
         await self._send_notification(
             notification,
             NotificationType.TOOL_LIST_CHANGED,
             client_ids,
         )
 
-    async def notify_cancelled(
-        self,
-        request_id: str | int,
-        reason: str | None = None,
-        client_ids: list[str] | None = None,
-    ) -> None:
-        """
-        Send a cancelled notification.
-
-        Args:
-            request_id: ID of the cancelled request
-            reason: Optional cancellation reason
-            client_ids: Specific clients to notify (None for all subscribed)
-        """
-        notification = CancelledNotification(
-            method="notifications/cancelled",
-            params=CancelledNotificationParams(
-                requestId=request_id,
-                reason=reason,
-            ),
-        )
-
-        # Don't debounce cancellation notifications
-        await self._send_notification(
-            notification,
-            NotificationType.CANCELLED,
-            client_ids,
-            debounce_ms=0,
-        )
-
     async def _send_notification(
         self,
-        notification: Notification,
+        notification: JSONRPCMessage,
         notification_type: NotificationType,
         client_ids: list[str] | None = None,
         debounce_key: str | None = None,
         debounce_ms: int | None = None,
     ) -> None:
-        """
-        Internal method to send or queue a notification.
-
-        Args:
-            notification: The notification to send
-            notification_type: Type of notification
-            client_ids: Specific clients to notify (None for all subscribed)
-            debounce_key: Key for debouncing
-            debounce_ms: Debounce time in ms
-        """
         # Determine target clients
         if client_ids is None:
             async with self.clients_lock:
-                # Find all clients subscribed to this notification type
-                client_ids = [
-                    client.client_id
-                    for client in self.clients.values()
-                    if any(
-                        sub.method == notification_type.value
-                        for sub in client.subscriptions.values()
-                    )
-                ]
+                client_ids = [client.client_id for client in self.clients.values()]
 
         if not client_ids:
-            return  # No clients to notify
+            return
 
         # Handle debouncing
         if debounce_key and (debounce_ms is None or debounce_ms > 0):
@@ -473,25 +333,15 @@ class NotificationManager:
                 debounce_ms or self.default_debounce_ms,
             )
         else:
-            # Send immediately
             await self._send_to_clients(notification, client_ids)
 
     async def _debounce_notification(
         self,
-        notification: Notification,
+        notification: JSONRPCMessage,
         client_ids: set[str],
         debounce_key: str,
         debounce_ms: int,
     ) -> None:
-        """
-        Debounce a notification.
-
-        Args:
-            notification: The notification to debounce
-            client_ids: Set of client IDs to notify
-            debounce_key: Key for debouncing
-            debounce_ms: Debounce time in milliseconds
-        """
         async with self.debounce_lock:
             now = time.time()
             send_after = now + (debounce_ms / 1000.0)
@@ -512,10 +362,9 @@ class NotificationManager:
                 )
 
     async def _process_debounced_notifications(self) -> None:
-        """Background task to process debounced notifications."""
         while self._running:
             try:
-                await asyncio.sleep(0.05)  # Check every 50ms
+                await asyncio.sleep(0.05)
 
                 now = time.time()
                 to_send: list[tuple[str, DebouncedNotification]] = []
@@ -540,22 +389,14 @@ class NotificationManager:
 
     async def _send_to_clients(
         self,
-        notification: Notification,
+        notification: JSONRPCMessage,
         client_ids: list[str],
     ) -> None:
-        """
-        Send a notification to specific clients with rate limiting.
-
-        Args:
-            notification: The notification to send
-            client_ids: List of client IDs to send to
-        """
-        # Convert notification to dict
+        # Convert notification to dict for transport
         notification_data = notification.model_dump(exclude_none=True)
 
-        # Add jsonrpc field if not present
-        if "jsonrpc" not in notification_data:
-            notification_data["jsonrpc"] = "2.0"
+        # Ensure jsonrpc present
+        notification_data["jsonrpc"] = notification_data.get("jsonrpc", "2.0")
 
         tasks = []
         for client_id in client_ids:
@@ -572,13 +413,6 @@ class NotificationManager:
         client_id: str,
         notification_data: dict[str, Any],
     ) -> None:
-        """
-        Send a notification to a single client.
-
-        Args:
-            client_id: Client ID
-            notification_data: Notification data as dict
-        """
         try:
             success = await self.sender.send_notification(client_id, notification_data)
             if success:
@@ -593,22 +427,13 @@ class NotificationManager:
             logger.exception(f"Error sending notification to client {client_id}")
 
     async def _check_rate_limit(self, client_id: str) -> bool:
-        """
-        Check if a client has exceeded the rate limit.
-
-        Args:
-            client_id: Client ID to check
-
-        Returns:
-            True if within rate limit, False if exceeded
-        """
         async with self.clients_lock:
             client = self.clients.get(client_id)
             if not client:
                 return False
 
             now = time.time()
-            window_duration = 60.0  # 1 minute window
+            window_duration = 60.0
 
             # Reset window if needed
             if now - client.rate_limit_window_start >= window_duration:
@@ -623,13 +448,12 @@ class NotificationManager:
             return True
 
     async def _cleanup_inactive_clients(self) -> None:
-        """Background task to clean up inactive clients."""
         while self._running:
             try:
-                await asyncio.sleep(60)  # Check every minute
+                await asyncio.sleep(60)
 
                 now = time.time()
-                inactive_threshold = 300  # 5 minutes
+                inactive_threshold = 300
 
                 async with self.clients_lock:
                     inactive_clients = [

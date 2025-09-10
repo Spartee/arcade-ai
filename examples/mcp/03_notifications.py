@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
-"""03: Notifications via ToolContext (log + progress).
+"""03: Notifications via ToolContext
 
-Run:
-  python 03_notifications.py [stream|sse|stdio]
 
-Clients that support notifications (e.g., Cursor/Claude Desktop) will
-render progress and log messages. If unsupported, calls silently no-op.
+Clients that support notifications (Cursor/Claude Desktop/etc.) will render progress and log messages.
+If unsupported, calls no-op gracefully. This example demonstrates:
+- context.log.* → notifications/message
+- context.notify.progress(...) → notifications/progress
+- You can also mix in context.client.* calls in async tools
 """
 
-# standard library
 import asyncio
-import sys
 from typing import Annotated
 
-from arcade_core.schema import ToolContext
-
-# third-party
-from arcade_mcp import Server
-from arcade_tdk import tool
+from arcade_mcp import Server, tool
+from arcade_tdk import ToolContext
 
 
 @tool(desc="Demonstrate progress and log notifications")
@@ -25,10 +21,7 @@ async def demo_progress(
     context: ToolContext,
     count: Annotated[int, "The number of steps to complete"] = 3,
 ) -> str:
-    """Emit a few progress updates and log lines, then return a message.
-
-    If the client didn't provide a progress token, progress updates no-op.
-    """
+    """Emit a few progress updates and log lines, then return a message."""
     await context.log.info("Starting demo")
 
     async with context.notify.progress(message="Working...", total=count) as tracker:
@@ -46,6 +39,4 @@ server = Server(name="notifications_example", version="0.1.0")
 server.add_tool(demo_progress)
 
 
-if __name__ == "__main__":
-    transport = sys.argv[1] if len(sys.argv) > 1 else "stream"
-    server.run(transport=transport, host="0.0.0.0", port=8000)  # noqa: S104
+server.run(transport="streamable-http", host="127.0.0.1", port=8000)

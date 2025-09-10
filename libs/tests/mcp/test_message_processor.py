@@ -2,18 +2,18 @@ import asyncio
 
 import pytest
 from arcade_serve.mcp.message_processor import MCPMessageProcessor, create_message_processor
-from arcade_serve.mcp.types import InitializeRequest, PingRequest
+from arcade_serve.mcp.types import JSONRPCRequest, PingRequest
 
 
 @pytest.mark.asyncio
 async def test_message_processor_parses_initialize_json():
     """Ensure JSON initialize strings are converted into InitializeRequest objects."""
-    json_init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+    json_init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"client","version":"0.0.0"}}}\n'
     processor = MCPMessageProcessor()
 
     result = await processor.process_request(json_init)
 
-    assert isinstance(result, InitializeRequest)
+    assert isinstance(result, JSONRPCRequest)
     assert result.id == 1
     assert result.method == "initialize"
 
@@ -49,7 +49,7 @@ async def test_message_processor_middleware_execution_order(monkeypatch):
     processor = create_message_processor(mw_sync, mw_async)
 
     # Use a pre-parsed PingRequest instance so we don't test parsing again here
-    ping = PingRequest(id=42)
+    ping = PingRequest(id=42, method="ping")
 
     _ = await processor.process_request(ping)
 

@@ -32,6 +32,15 @@ class TestRouter:
     def add_route(self, path: str, handler, **kwargs):
         self.routes.append({"path": path, "handler": handler, "kwargs": kwargs})
 
+    def add_raw_route(self, spec):
+        # Simulate FastAPIWorker mounting a raw route described by RouteSpec
+        for m in spec.methods:
+            self.routes.append({
+                "path": spec.path.lstrip("/"),
+                "handler": spec.endpoint,
+                "kwargs": {"method": m, "response_class": spec.response_class},
+            })
+
 
 @pytest.fixture
 def tool_catalog():
