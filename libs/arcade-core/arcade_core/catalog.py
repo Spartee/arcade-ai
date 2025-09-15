@@ -436,7 +436,15 @@ def create_input_definition(func: Callable) -> ToolInput:
     tool_context_param_name: str | None = None
 
     for _, param in inspect.signature(func, follow_wrapped=True).parameters.items():
-        if param.annotation is ToolContext:
+        ann = param.annotation
+        if isinstance(ann, type) and issubclass(ann, ToolContext):
+            # Soft guidance for developers using legacy ToolContext
+            if os.getenv("ARCADE_DEV_WARN", "1") == "1":
+                logger.debug(
+                    "Tool '%s': parameter '%s' uses ToolContext; recommend annotating with arcade_tdk.Context for new tools",
+                    func.__name__,
+                    param.name,
+                )
             if tool_context_param_name is not None:
                 raise ToolDefinitionError(
                     f"Only one ToolContext parameter is supported, but tool {func.__name__} has multiple."
@@ -792,7 +800,7 @@ def extract_properties(type_to_check: type) -> dict[str, WireTypeInfo] | None:
                 field_type = next(arg for arg in get_args(field_type) if arg is not type(None))
 
             # Get wire type info recursively
-            wire_info = get_wire_type_info(field_type)
+            wire_info = get_wire_type_info(field_type)  # type: ignore[arg-type]
             properties[field_name] = wire_info
 
     # Handle TypedDict
@@ -805,10 +813,10 @@ def extract_properties(type_to_check: type) -> dict[str, WireTypeInfo] | None:
 
         for field_name, field_type in type_hints.items():
             # Handle Optional types (Union[T, None])
-            if is_strict_optional(field_type):
+            if is_strict_optional(field_type):  # type: ignore[arg-type]
                 # Extract the non-None type from Optional
                 field_type = next(arg for arg in get_args(field_type) if arg is not type(None))
-            wire_info = get_wire_type_info(field_type)
+            wire_info = get_wire_type_info(field_type)  # type: ignore[arg-type]
 
             # Add description if available
             if field_name in field_descriptions:
@@ -965,8 +973,9 @@ def create_func_models(func: Callable) -> tuple[type[BaseModel], type[BaseModel]
     if asyncio.iscoroutinefunction(func) and hasattr(func, "__wrapped__"):
         func = func.__wrapped__
     for name, param in inspect.signature(func, follow_wrapped=True).parameters.items():
-        # Skip ToolContext parameters
-        if param.annotation is ToolContext:
+        # Skip ToolContext parameters (including subclasses like arcade_tdk.Context)
+        ann = param.annotation
+        if isinstance(ann, type) and issubclass(ann, ToolContext):
             continue
 
         # TODO make this cleaner
@@ -1101,9 +1110,13 @@ def create_model_from_typeddict(typeddict_class: type, model_name: str) -> type[
 def to_tool_secret_requirements(
     secrets_requirement: list[str],
 ) -> list[ToolSecretRequirement]:
-    # Iterate through the list, de-dupe case-insensitively, and convert each string to a ToolSecretRequirement
-    unique_secrets = {name.lower(): name.lower() for name in secrets_requirement}.values()
-    return [ToolSecretRequirement(key=name) for name in unique_secrets]
+    # De-dupe case-insensitively but preserve the original casing for env var lookup
+    unique_map: dict[str, str] = {}
+    for name in secrets_requirement:
+        lowered = str(name).lower()
+        if lowered not in unique_map:
+            unique_map[lowered] = str(name)
+    return [ToolSecretRequirement(key=orig_name) for orig_name in unique_map.values()]
 
 
 def to_tool_metadata_requirements(
