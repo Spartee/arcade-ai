@@ -8,6 +8,7 @@ from arcade_core.schema import (
 )
 from arcade_core.toolkit import Toolkit
 
+from arcade_tdk.context import Context
 from arcade_tdk.tool import tool
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "ToolMetadataKey",
     "ToolSecretItem",
     "Toolkit",
+    "Context",
     "tool",
 ]
