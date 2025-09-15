@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from arcade_core.telemetry import OTELHandler, ShutdownError
+from arcade_serve.fastapi.telemetry import OTELHandler, ShutdownError
 from fastapi import FastAPI
 
 
@@ -15,11 +15,11 @@ def handler_disabled(app):
     return OTELHandler(enable=False)
 
 
-@patch("arcade_core.telemetry.logging")
-@patch("arcade_core.telemetry.FastAPIInstrumentor")
-@patch("arcade_core.telemetry.OTLPLogExporter")
-@patch("arcade_core.telemetry.OTLPMetricExporter")
-@patch("arcade_core.telemetry.OTLPSpanExporter")
+@patch("arcade_serve.fastapi.telemetry.logging")
+@patch("arcade_serve.fastapi.telemetry.FastAPIInstrumentor")
+@patch("arcade_serve.fastapi.telemetry.OTLPLogExporter")
+@patch("arcade_serve.fastapi.telemetry.OTLPMetricExporter")
+@patch("arcade_serve.fastapi.telemetry.OTLPSpanExporter")
 def test_init_with_enable_true(
     mock_span_exporter,
     mock_metric_exporter,
@@ -53,8 +53,8 @@ def test_init_with_enable_true(
     mock_instrumentor.return_value.instrument_app.assert_called_once_with(app)
 
 
-@patch("arcade_core.telemetry.logging")
-@patch("arcade_core.telemetry.FastAPIInstrumentor")
+@patch("arcade_serve.fastapi.telemetry.logging")
+@patch("arcade_serve.fastapi.telemetry.FastAPIInstrumentor")
 def test_init_with_enable_false(mock_instrumentor, mock_logging, app):
     handler = OTELHandler(enable=False)
     handler.instrument_app(app)
@@ -81,9 +81,9 @@ def test_init_tracer_export_exception(app):
     assert "Could not connect to OpenTelemetry Tracer endpoint" in str(exc_info.value)
 
 
-@patch("arcade_core.telemetry.OTLPLogExporter")
-@patch("arcade_core.telemetry.OTLPMetricExporter")
-@patch("arcade_core.telemetry.OTLPSpanExporter")
+@patch("arcade_serve.fastapi.telemetry.OTLPLogExporter")
+@patch("arcade_serve.fastapi.telemetry.OTLPMetricExporter")
+@patch("arcade_serve.fastapi.telemetry.OTLPSpanExporter")
 def test_shutdown(mock_span_exporter, mock_metric_exporter, mock_log_exporter, app):
     # Mock the shutdown methods
     mock_span_exporter.return_value.shutdown = MagicMock()
@@ -120,10 +120,10 @@ def test_shutdown_logging_not_initialized(handler_disabled):
     assert "Log provider not initialized" in str(exc_info.value)
 
 
-@patch("arcade_core.telemetry.get_meter_provider")
-@patch("arcade_core.telemetry.OTLPLogExporter")
-@patch("arcade_core.telemetry.OTLPMetricExporter")
-@patch("arcade_core.telemetry.OTLPSpanExporter")
+@patch("arcade_serve.fastapi.telemetry.get_meter_provider")
+@patch("arcade_serve.fastapi.telemetry.OTLPLogExporter")
+@patch("arcade_serve.fastapi.telemetry.OTLPMetricExporter")
+@patch("arcade_serve.fastapi.telemetry.OTLPSpanExporter")
 def test_get_meter(
     mock_span_exporter, mock_metric_exporter, mock_log_exporter, mock_get_meter_provider, app
 ):

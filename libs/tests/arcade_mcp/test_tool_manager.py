@@ -1,0 +1,96 @@
+"""Tests for Tool Manager implementation."""
+
+import pytest
+import asyncio
+
+from arcade_mcp.managers.tool_manager import ToolManager
+from arcade_mcp.exceptions import NotFoundError
+from arcade_mcp.types import Tool
+
+
+class TestToolManager:
+    """Test ToolManager class."""
+
+    @pytest.fixture
+    def tool_manager(self, tool_catalog):
+        """Create a tool manager instance."""
+        return ToolManager(
+            catalog=tool_catalog,
+        )
+
+    def test_manager_initialization(self, tool_catalog):
+        """Test tool manager initialization."""
+        manager = ToolManager(
+            catalog=tool_catalog,
+        )
+
+        assert manager.catalog == tool_catalog
+
+    @pytest.mark.asyncio
+    async def test_list_tools(self, tool_manager):
+        """Test listing tools."""
+        tools = await tool_manager.list_tools()
+
+        assert isinstance(tools, list)
+        assert all(isinstance(t, Tool) for t in tools)
+
+        if tools:
+            tool = tools[0]
+            assert hasattr(tool, "name")
+            assert hasattr(tool, "description")
+            assert hasattr(tool, "inputSchema")
+
+    @pytest.mark.asyncio
+    async def test_list_tools_before_init(self, tool_catalog):
+        """Passive manager lists from catalog immediately."""
+        manager = ToolManager(catalog=tool_catalog)
+        tools = await manager.list_tools()
+        assert isinstance(tools, list)
+
+    @pytest.mark.asyncio
+    async def test_get_tool(self, tool_manager, materialized_tool):
+        """Test getting a specific tool."""
+        # Get tool by name
+        tool_name = materialized_tool.definition.fully_qualified_name
+        tool = await tool_manager.get_tool(tool_name)
+        assert tool.definition.fully_qualified_name == tool_name
+
+        # Try to get non-existent tool
+        with pytest.raises(NotFoundError):
+            await tool_manager.get_tool("NonExistent.tool")
+
+    @pytest.mark.asyncio
+    async def test_remove_tool(self, tool_manager, materialized_tool):
+        """Test removing tools."""
+        name = materialized_tool.definition.fully_qualified_name
+        _ = await tool_manager.get_tool(name)
+
+        removed = await tool_manager.remove_tool(name)
+        assert removed.definition.fully_qualified_name == name
+
+        with pytest.raises(NotFoundError):
+            await tool_manager.get_tool(name)
+
+    @pytest.mark.asyncio
+    async def test_remove_nonexistent_tool(self, tool_manager):
+        """Test removing non-existent tool."""
+        with pytest.raises(NotFoundError):
+            await tool_manager.remove_tool("NonExistent.tool")
+
+    @pytest.mark.asyncio
+    async def test_tool_conversion(self, tool_manager, materialized_tool):
+        """Test conversion of MaterializedTool to MCP Tool format."""
+        tools = await tool_manager.list_tools()
+        if not tools:
+            pytest.skip("No tools in catalog fixture to validate conversion")
+        tool = tools[0]
+
+        # Check required fields
+        assert isinstance(tool.name, str)
+        assert isinstance(tool.description, str) or tool.description is None
+        assert "inputSchema" in tool.model_dump()
+
+        schema = tool.inputSchema
+        assert schema["type"] == "object"
+        assert "properties" in schema
+
