@@ -22,10 +22,6 @@ logger = logging.getLogger("arcade.mcp.managers.tool")
 class ToolManager(ComponentManager[MaterializedTool]):
     """
     Manages tools for the MCP server.
-
-    Passive manager: no per-manager locks or start/stop lifecycle. The
-    tool map is initialized from the provided catalog at construction time
-    and kept in sync on add/update operations.
     """
 
     def __init__(
@@ -46,8 +42,8 @@ class ToolManager(ComponentManager[MaterializedTool]):
 
         # Seed cache from catalog
         for tool in self.catalog:
-            self._tools_cache[tool.definition.fully_qualified_name] = tool
-        logger.info(f"Tool manager initialized with {len(self._tools_cache)} tools")
+            name = tool.definition.fully_qualified_name.replace(".", "_")
+            self._tools_cache[name] = tool
 
     async def list_tools(self) -> list[Tool]:
         """
@@ -59,7 +55,7 @@ class ToolManager(ComponentManager[MaterializedTool]):
         tools: list[Tool] = []
         for tool in self._tools_cache.values():
             mcp_tool = Tool(
-                name=tool.definition.fully_qualified_name,
+                name=tool.definition.fully_qualified_name.replace(".", "_"),
                 description=tool.definition.description,
                 inputSchema={
                     "type": "object",
@@ -99,7 +95,7 @@ class ToolManager(ComponentManager[MaterializedTool]):
         Args:
             tool: Tool to add
         """
-        name = tool.definition.fully_qualified_name
+        name = tool.definition.fully_qualified_name.replace(".", "_")
 
         if name in self._tools_cache:
             existing = self._tools_cache[name]
@@ -148,7 +144,7 @@ class ToolManager(ComponentManager[MaterializedTool]):
             raise NotFoundError(f"Tool '{name}' not found")
 
         old_tool = self._tools_cache.pop(name)
-        new_name = tool.definition.fully_qualified_name
+        new_name = tool.definition.fully_qualified_name.replace(".", "_")
         self._tools_cache[new_name] = tool
         self._on_update(new_name, old_tool, tool)
         return tool
