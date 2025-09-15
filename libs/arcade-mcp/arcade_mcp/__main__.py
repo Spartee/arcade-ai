@@ -110,12 +110,16 @@ def initialize_tool_catalog(
 async def run_stdio_server(
     catalog: ToolCatalog,
     debug: bool = False,
+    env_file: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Run MCP server with stdio transport."""
     from arcade_mcp.transports.stdio import StdioTransport
 
     # Load settings
+    # Ensure env from provided .env is loaded for stdio runs as well
+    if env_file:
+        load_dotenv(env_file)
     settings = MCPSettings.from_env()
     if debug:
         settings.debug = True
@@ -300,7 +304,7 @@ Auto-discovery looks for Python files with @tool decorated functions in:
     try:
         if args.transport == "stdio":
             logger.info("Starting MCP server with stdio transport")
-            asyncio.run(run_stdio_server(catalog, debug=args.debug, **server_kwargs))
+            asyncio.run(run_stdio_server(catalog, debug=args.debug, env_file=args.env_file, **server_kwargs))
         else:
             logger.info(f"Starting MCP server with HTTP transport on {args.host}:{args.port}")
             from arcade_mcp.worker import run_arcade_mcp

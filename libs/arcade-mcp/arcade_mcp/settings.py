@@ -175,6 +175,15 @@ class ToolEnvironmentSettings(BaseSettings):
         description="Tool environment",
     )
 
+    def model_post_init(self, __context: Any) -> None:
+        """Populate tool_environment from process env if not provided."""
+        if not self.tool_environment:
+            excluded_prefixes = ("MCP_", "ARCADE_")
+            self.tool_environment = {
+                key: value for key, value in os.environ.items()
+                if not any(key.startswith(prefix) for prefix in excluded_prefixes)
+            }
+
     model_config = {
         "env_prefix": "",
         "env_file": ".env",

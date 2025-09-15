@@ -513,6 +513,8 @@ class MCPServer(MCPComponent):
                         tool_context.set_secret(
                             secret.key, self.settings.tool_secrets()[secret.key]
                         )
+                    elif secret.key in os.environ:
+                        tool_context.set_secret(secret.key, os.environ[secret.key])
 
         # user_id is local ARCADE_USER_ID if development
         if self.settings.arcade.environment == "development":
