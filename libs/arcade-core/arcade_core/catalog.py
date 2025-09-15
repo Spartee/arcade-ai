@@ -439,12 +439,6 @@ def create_input_definition(func: Callable) -> ToolInput:
         ann = param.annotation
         if isinstance(ann, type) and issubclass(ann, ToolContext):
             # Soft guidance for developers using legacy ToolContext
-            if os.getenv("ARCADE_DEV_WARN", "1") == "1":
-                logger.debug(
-                    "Tool '%s': parameter '%s' uses ToolContext; recommend annotating with arcade_tdk.Context for new tools",
-                    func.__name__,
-                    param.name,
-                )
             if tool_context_param_name is not None:
                 raise ToolDefinitionError(
                     f"Only one ToolContext parameter is supported, but tool {func.__name__} has multiple."

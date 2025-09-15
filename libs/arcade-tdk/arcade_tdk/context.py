@@ -38,15 +38,6 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     _tdk_get_current_model_context = None  # type: ignore[assignment]
 
-if os.getenv("ARCADE_DEV_WARN", "1") == "1":  # soft guidance only in dev
-    warnings.filterwarnings("default", category=DeprecationWarning)
-    warnings.warn(
-        "arcade_tdk.Context shim is planned for removal in arcade-tdk 3.0.0; "
-        "new tools should annotate `Context` (this class) and track release notes for the migration path.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
 
 def _get_model_context() -> ModelContext:
     """Retrieve the current ModelContext from the runtime layer.
