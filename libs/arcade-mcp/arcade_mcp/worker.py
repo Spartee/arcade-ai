@@ -1,0 +1,147 @@
+"""
+Arcade MCP Server (Integrated Worker + MCP HTTP)
+
+Creates a FastAPI application that exposes both Arcade Worker endpoints and
+MCP Server endpoints over HTTP/SSE. MCP is always enabled in this integrated mode.
+"""
+
+import uvicorn
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator
+
+from fastapi import FastAPI, Request
+from arcade_core.catalog import ToolCatalog
+from arcade_serve.fastapi.worker import FastAPIWorker
+from loguru import logger
+from starlette.responses import Response
+
+from arcade_mcp.server import MCPServer
+from arcade_mcp.settings import MCPSettings
+from arcade_mcp.transports.http_session_manager import HTTPSessionManager
+
+
+@asynccontextmanager
+async def create_lifespan(
+    catalog: ToolCatalog,
+    mcp_settings: MCPSettings | None = None,
+    **kwargs: Any,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """
+    Create lifespan context for the MCP server components.
+
+    Yields a dict with `mcp_server`, and `session_manager`.
+    """
+    if mcp_settings is None:
+        mcp_settings = MCPSettings.from_env()
+
+    mcp_server = MCPServer(
+        catalog,
+        settings=mcp_settings,
+        **kwargs,
+    )
+
+    session_manager = HTTPSessionManager(
+        server=mcp_server,
+        json_response=True,
+    )
+
+    await mcp_server._start()
+    async with session_manager.run():
+        logger.info("MCP server started and ready for connections")
+        yield {
+            "mcp_server": mcp_server,
+            "session_manager": session_manager,
+        }
+    await mcp_server._stop()
+
+
+def create_arcade_mcp(
+    catalog: ToolCatalog,
+    mcp_settings: MCPSettings | None = None,
+    debug: bool = False,
+    **kwargs: Any,
+) -> FastAPI:
+    """
+    Create a FastAPI app exposing Arcade Worker and MCP HTTP endpoints.
+
+    MCP is always enabled in this integrated application.
+    """
+    if mcp_settings is None:
+        mcp_settings = MCPSettings.from_env()
+    secret = mcp_settings.arcade.server_secret
+    if secret is None:
+        secret = "dev"
+        auth_disabled = True
+
+
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        async with create_lifespan(
+            catalog, mcp_settings, **kwargs
+        ) as components:
+            app.state.mcp_server = components["mcp_server"]
+            app.state.session_manager = components["session_manager"]
+            yield
+
+    app = FastAPI(
+        title=(mcp_settings.server.title or mcp_settings.server.name),
+        description=(mcp_settings.server.instructions or ""),
+        version=mcp_settings.server.version,
+        docs_url="/docs" if not mcp_settings.arcade.auth_disabled else None,
+        redoc_url="/redoc" if not mcp_settings.arcade.auth_disabled else None,
+        lifespan=lifespan,
+        **kwargs,
+    )
+
+    # Worker endpoints
+    worker = FastAPIWorker(
+        app=app,
+        secret=secret,
+        disable_auth=mcp_settings.arcade.auth_disabled,
+    )
+    worker.catalog = catalog
+
+    class _MCPASGIProxy:
+        def __init__(self, parent_app: FastAPI):
+            self._app = parent_app
+
+        async def __call__(self, scope, receive, send):
+            session_manager = getattr(self._app.state, "session_manager", None)
+            if session_manager is None:
+                resp = Response("MCP server not initialized", status_code=503)
+                await resp(scope, receive, send)
+                return
+            await session_manager.handle_request(scope, receive, send)
+
+    app.mount("/mcp", _MCPASGIProxy(app))
+
+    return app
+
+
+def run_arcade_mcp(
+    catalog: ToolCatalog,
+    host: str = "127.0.0.1",
+    port: int = 7777,
+    reload: bool = False,
+    debug: bool = False,
+    **kwargs: Any,
+) -> None:
+    """
+    Run the integrated Arcade MCP server with uvicorn.
+    """
+
+    app = create_arcade_mcp(
+        catalog=catalog,
+        debug=debug,
+        **kwargs,
+    )
+
+    log_level = "debug" if debug else "info"
+
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=log_level,
+        reload=reload,
+        lifespan="on",
+    )
