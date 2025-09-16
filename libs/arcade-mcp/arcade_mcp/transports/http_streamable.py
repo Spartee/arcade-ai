@@ -2,20 +2,48 @@
 
 This module implements HTTP transport with Server-Sent Events (SSE) streaming support,
 following the patterns from the sample library.
+
+Design overview
+- The transport provides a duplex, in-process message channel between the HTTP layer
+  and the MCP session using anyio memory streams:
+  - read side (transport -> session):
+    - `_read_stream_writer` (SendStream[SessionMessage | Exception])
+    - `_read_stream` (ReceiveStream[SessionMessage | Exception])
+  - write side (session -> transport):
+    - `_write_stream` (SendStream[SessionMessage])
+    - `_write_stream_reader` (ReceiveStream[SessionMessage])
+
+- The transport writes inbound client messages (parsed from HTTP requests) to
+  `_read_stream_writer`; the session consumes them from `_read_stream`.
+
+- The session writes outbound server messages to `_write_stream`; the transport's
+  `message_router` task consumes them from `_write_stream_reader` and fans them out
+  to the correct per-request stream maintained in `_request_streams[request_id]`.
+
+- Response modes:
+  - JSON response mode: a single HTTP JSON response is returned by awaiting the
+    first terminal message (JSONRPCResponse or JSONRPCError) for the request.
+  - SSE response mode: a long-lived stream of events is sent as SSE; the stream
+    is closed when a terminal message is observed for the request.
+
+- A standalone GET SSE stream uses the special key `GET_STREAM_KEY` to deliver
+  server-initiated events without a preceding POST.
+
+- Optional resumability can be enabled by providing an `EventStore` implementation.
 """
 
-import asyncio
 import json
 import logging
 import re
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import AsyncIterator, Callable, Optional
+from typing import cast
 
 import anyio
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from pydantic import ValidationError
+from pydantic import BaseModel, TypeAdapter
 from sse_starlette import EventSourceResponse
 from starlette.requests import Request
 from starlette.responses import Response
@@ -23,18 +51,17 @@ from starlette.types import Receive, Scope, Send
 
 from arcade_mcp.session import ServerSession
 from arcade_mcp.types import (
+    INTERNAL_ERROR,
+    INVALID_REQUEST,
+    PARSE_ERROR,
+    ErrorData,
     JSONRPCError,
     JSONRPCMessage,
     JSONRPCRequest,
     JSONRPCResponse,
+    MCPMessage,
     RequestId,
     SessionMessage,
-    ErrorData,
-    PARSE_ERROR,
-    INVALID_PARAMS,
-    INVALID_REQUEST,
-    INTERNAL_ERROR,
-    MCPMessage,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,17 +89,18 @@ EventId = str
 @dataclass
 class EventMessage:
     """A JSONRPCMessage with an optional event ID for stream resumability."""
-    message: JSONRPCMessage
-    event_id: Optional[str] = None
+
+    message: MCPMessage
+    event_id: str | None = None
 
 
-EventCallback = Callable[[EventMessage], asyncio.Future[None]]
+EventCallback = Callable[[EventMessage], Awaitable[None]]
 
 
 class EventStore:
     """Interface for resumability support via event storage."""
 
-    async def store_event(self, stream_id: StreamId, message: JSONRPCMessage) -> EventId:
+    async def store_event(self, stream_id: StreamId, message: MCPMessage) -> EventId:
         """Store an event for later retrieval."""
         raise NotImplementedError
 
@@ -80,7 +108,7 @@ class EventStore:
         self,
         last_event_id: EventId,
         send_callback: EventCallback,
-    ) -> Optional[StreamId]:
+    ) -> StreamId | None:
         """Replay events after the specified event ID."""
         raise NotImplementedError
 
@@ -88,16 +116,35 @@ class EventStore:
 class HTTPStreamableTransport:
     """HTTP transport with SSE streaming support for MCP.
 
-    Handles JSON-RPC messages in HTTP POST requests with SSE streaming.
-    Supports optional JSON responses and session management.
+    Responsibilities
+    - Parse HTTP requests into JSON-RPC messages and enqueue them on the
+      transport→session read stream (via `_read_stream_writer`).
+    - Consume session→transport messages from `_write_stream_reader` in a
+      background `message_router`, routing them to per-request streams in
+      `_request_streams` keyed by the JSON-RPC request id (or `GET_STREAM_KEY`
+      for the standalone GET SSE stream).
+    - Serve responses back to the HTTP client:
+      - JSON response mode: wait for the first terminal response and return a
+        single `application/json` body.
+      - SSE mode: stream each outbound `SessionMessage` as an SSE event with
+        appropriate headers and close on terminal response.
+
+    Streams created in `connect()`
+    - `_read_stream_writer` / `_read_stream`: transport→session channel for inbound
+      client messages.
+    - `_write_stream` / `_write_stream_reader`: session→transport channel for outbound
+      server messages, consumed by the `message_router`.
+
+    These in-memory channels provide backpressure and decouple HTTP from the session
+    loop while keeping the implementation fully async.
     """
 
     def __init__(
         self,
-        mcp_session_id: Optional[str],
-        session: Optional[ServerSession] = None,
+        mcp_session_id: str | None,
+        session: ServerSession | None = None,
         is_json_response_enabled: bool = False,
-        event_store: Optional[EventStore] = None,
+        event_store: EventStore | None = None,
     ):
         """Initialize HTTP streamable transport.
 
@@ -114,22 +161,26 @@ class HTTPStreamableTransport:
         self.session = session
         self.is_json_response_enabled = is_json_response_enabled
         self._event_store = event_store
-        self._request_streams: dict[RequestId, tuple[MemoryObjectSendStream[EventMessage], MemoryObjectReceiveStream[EventMessage]]] = {}
+        self._request_streams: dict[
+            RequestId,
+            tuple[MemoryObjectSendStream[EventMessage], MemoryObjectReceiveStream[EventMessage]],
+        ] = {}
         self._terminated = False
 
         # Streams for connection
-        self._read_stream_writer: Optional[MemoryObjectSendStream[SessionMessage | Exception]] = None
-        self._read_stream: Optional[MemoryObjectReceiveStream[SessionMessage | Exception]] = None
-        self._write_stream: Optional[MemoryObjectSendStream[SessionMessage]] = None
-        self._write_stream_reader: Optional[MemoryObjectReceiveStream[SessionMessage]] = None
+        self._read_stream_writer: MemoryObjectSendStream[str | Exception] | None = None
+        self._read_stream: MemoryObjectReceiveStream[str | Exception] | None = None
+        self._write_stream: MemoryObjectSendStream[str | SessionMessage] | None = None
+        self._write_stream_reader: MemoryObjectReceiveStream[str | SessionMessage] | None = None
 
-    def _parse_mcp_message(self, obj: str | dict[str, object] | JSONRPCMessage) -> MCPMessage:
+    def _parse_mcp_message(self, obj: str | dict[str, object] | MCPMessage) -> MCPMessage:
         """Parse incoming data into a typed MCPMessage.
 
-        Accepts a raw JSON string, already-parsed dict, or an existing JSONRPCMessage.
+        Accepts a raw JSON string, already-parsed dict, or an existing MCPMessage.
         """
-        if isinstance(obj, JSONRPCMessage):
-            return obj
+        if isinstance(obj, BaseModel):
+            # Already a pydantic model; trust caller and cast to MCPMessage
+            return cast(MCPMessage, obj)
 
         parsed: dict[str, object]
         if isinstance(obj, str):
@@ -138,18 +189,21 @@ class HTTPStreamableTransport:
             except Exception as exc:  # parse error - treat as invalid request
                 raise ValueError(f"Invalid JSON: {exc}")
             if not isinstance(maybe, dict):
-                raise ValueError("JSON must be an object")
+                raise TypeError("JSON must be an object")
             parsed = maybe
-        else:
+        elif isinstance(obj, dict):
             parsed = obj
+        else:
+            raise TypeError("Unsupported message type")
 
-        if "id" in parsed and "result" in parsed:
-            return JSONRPCResponse.model_validate(parsed)
-        if "id" in parsed and "error" in parsed:
-            return JSONRPCError.model_validate(parsed)
-        if "id" in parsed and "method" in parsed:
-            return JSONRPCRequest.model_validate(parsed)
-        return JSONRPCMessage.model_validate(parsed)
+        try:
+            return TypeAdapter(MCPMessage).validate_python(parsed)
+        except Exception:
+            # Fallback: treat as error
+            return JSONRPCError(
+                id=str(parsed.get("id", "null")),
+                error={"code": -32600, "message": "Invalid message"},
+            )
 
     @property
     def is_terminated(self) -> bool:
@@ -161,7 +215,7 @@ class HTTPStreamableTransport:
         error_message: str,
         status_code: HTTPStatus,
         error_code: int = INVALID_REQUEST,
-        headers: Optional[dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
     ) -> Response:
         """Create an error response."""
         response_headers = {"Content-Type": CONTENT_TYPE_JSON}
@@ -185,9 +239,9 @@ class HTTPStreamableTransport:
 
     def _create_json_response(
         self,
-        response_message: Optional[JSONRPCMessage],
+        response_message: JSONRPCMessage | None,
         status_code: HTTPStatus = HTTPStatus.OK,
-        headers: Optional[dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
     ) -> Response:
         """Create a JSON response."""
         response_headers = {"Content-Type": CONTENT_TYPE_JSON}
@@ -198,12 +252,14 @@ class HTTPStreamableTransport:
             response_headers[MCP_SESSION_ID_HEADER] = self.mcp_session_id
 
         return Response(
-            response_message.model_dump_json(by_alias=True, exclude_none=True) if response_message else None,
+            response_message.model_dump_json(by_alias=True, exclude_none=True)
+            if response_message
+            else None,
             status_code=status_code,
             headers=response_headers,
         )
 
-    def _get_session_id(self, request: Request) -> Optional[str]:
+    def _get_session_id(self, request: Request) -> str | None:
         """Extract session ID from request headers."""
         return request.headers.get(MCP_SESSION_ID_HEADER)
 
@@ -268,7 +324,9 @@ class HTTPStreamableTransport:
 
         return any(part == CONTENT_TYPE_JSON for part in content_type_parts)
 
-    async def _handle_post_request(self, scope: Scope, request: Request, receive: Receive, send: Send) -> None:
+    async def _handle_post_request(
+        self, scope: Scope, request: Request, receive: Receive, send: Send
+    ) -> None:
         """Handle POST requests containing JSON-RPC messages."""
         writer = self._read_stream_writer
         if writer is None:
@@ -291,8 +349,8 @@ class HTTPStreamableTransport:
                         "Not Acceptable: Client must accept text/event-stream",
                         HTTPStatus.NOT_ACCEPTABLE,
                     )
-                await response(scope, receive, send)
-                return
+                    await response(scope, receive, send)
+                    return
 
             # Validate Content-Type for POST payloads only when JSON mode
             if self.is_json_response_enabled and not self._check_content_type(request):
@@ -310,7 +368,9 @@ class HTTPStreamableTransport:
             try:
                 raw_message = json.loads(body)
             except json.JSONDecodeError as e:
-                response = self._create_error_response(f"Parse error: {str(e)}", HTTPStatus.BAD_REQUEST, PARSE_ERROR)
+                response = self._create_error_response(
+                    f"Parse error: {e!s}", HTTPStatus.BAD_REQUEST, PARSE_ERROR
+                )
                 await response(scope, receive, send)
                 return
 
@@ -393,7 +453,9 @@ class HTTPStreamableTransport:
                     await self._clean_up_memory_streams(request_id)
             else:
                 # SSE response mode
-                sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[dict[str, str]](0)
+                sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[
+                    dict[str, str]
+                ](0)
 
                 async def sse_writer():
                     try:
@@ -402,7 +464,9 @@ class HTTPStreamableTransport:
                                 event_data = self._create_event_data(event_message)
                                 await sse_stream_writer.send(event_data)
 
-                                if isinstance(event_message.message, (JSONRPCResponse, JSONRPCError)):
+                                if isinstance(
+                                    event_message.message, (JSONRPCResponse, JSONRPCError)
+                                ):
                                     break
                     except Exception:
                         logger.exception("Error in SSE writer")
@@ -414,7 +478,7 @@ class HTTPStreamableTransport:
                     "Cache-Control": "no-cache, no-transform",
                     "Connection": "keep-alive",
                     "Content-Type": CONTENT_TYPE_SSE,
-                    **(({MCP_SESSION_ID_HEADER: self.mcp_session_id} if self.mcp_session_id else {})),
+                    **({MCP_SESSION_ID_HEADER: self.mcp_session_id} if self.mcp_session_id else {}),
                 }
 
                 response = EventSourceResponse(
@@ -454,11 +518,11 @@ class HTTPStreamableTransport:
         _, has_sse = self._check_accept_headers(request)
 
         if not has_sse:
-            response = self._create_error_response(
+            error_response = self._create_error_response(
                 "Not Acceptable: Client must accept text/event-stream",
                 HTTPStatus.NOT_ACCEPTABLE,
             )
-            await response(request.scope, request.receive, send)
+            await error_response(request.scope, request.receive, send)
             return
 
         if not await self._validate_request_headers(request, send):
@@ -480,19 +544,21 @@ class HTTPStreamableTransport:
 
         # Check if we already have an active GET stream
         if GET_STREAM_KEY in self._request_streams:
-            response = self._create_error_response(
+            error_response = self._create_error_response(
                 "Conflict: Only one SSE stream is allowed per session",
                 HTTPStatus.CONFLICT,
             )
-            await response(request.scope, request.receive, send)
+            await error_response(request.scope, request.receive, send)
             return
 
         # Create SSE stream
         sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[dict[str, str]](0)
 
-        async def standalone_sse_writer():
+        async def standalone_sse_writer() -> None:
             try:
-                self._request_streams[GET_STREAM_KEY] = anyio.create_memory_object_stream[EventMessage](0)
+                self._request_streams[GET_STREAM_KEY] = anyio.create_memory_object_stream[
+                    EventMessage
+                ](0)
                 standalone_stream_reader = self._request_streams[GET_STREAM_KEY][1]
 
                 async with sse_stream_writer, standalone_stream_reader:
@@ -505,14 +571,14 @@ class HTTPStreamableTransport:
                 logger.debug("Closing standalone SSE writer")
                 await self._clean_up_memory_streams(GET_STREAM_KEY)
 
-        response = EventSourceResponse(
+        sse_response: EventSourceResponse = EventSourceResponse(
             content=sse_stream_reader,
             data_sender_callable=standalone_sse_writer,
             headers=headers,
         )
 
         try:
-            await response(request.scope, request.receive, send)
+            await sse_response(request.scope, request.receive, send)
         except Exception:
             logger.exception("Error in standalone SSE response")
             await sse_stream_writer.aclose()
@@ -546,7 +612,6 @@ class HTTPStreamableTransport:
         request_stream_keys = list(self._request_streams.keys())
         for key in request_stream_keys:
             await self._clean_up_memory_streams(key)
-
         self._request_streams.clear()
 
         try:
@@ -579,9 +644,7 @@ class HTTPStreamableTransport:
 
     async def _validate_request_headers(self, request: Request, send: Send) -> bool:
         """Validate request headers."""
-        if not await self._validate_session(request, send):
-            return False
-        return True
+        return await self._validate_session(request, send)
 
     async def _validate_session(self, request: Request, send: Send) -> bool:
         """Validate session ID in request."""
@@ -624,11 +687,14 @@ class HTTPStreamableTransport:
             if self.mcp_session_id:
                 headers[MCP_SESSION_ID_HEADER] = self.mcp_session_id
 
-            sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[dict[str, str]](0)
+            sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[
+                dict[str, str]
+            ](0)
 
-            async def replay_sender():
+            async def replay_sender() -> None:
                 try:
                     async with sse_stream_writer:
+
                         async def send_event(event_message: EventMessage) -> None:
                             event_data = self._create_event_data(event_message)
                             await sse_stream_writer.send(event_data)
@@ -636,7 +702,9 @@ class HTTPStreamableTransport:
                         stream_id = await event_store.replay_events_after(last_event_id, send_event)
 
                         if stream_id and stream_id not in self._request_streams:
-                            self._request_streams[stream_id] = anyio.create_memory_object_stream[EventMessage](0)
+                            self._request_streams[stream_id] = anyio.create_memory_object_stream[
+                                EventMessage
+                            ](0)
                             msg_reader = self._request_streams[stream_id][1]
 
                             async with msg_reader:
@@ -646,14 +714,14 @@ class HTTPStreamableTransport:
                 except Exception:
                     logger.exception("Error in replay sender")
 
-            response = EventSourceResponse(
+            sse_response: EventSourceResponse = EventSourceResponse(
                 content=sse_stream_reader,
                 data_sender_callable=replay_sender,
                 headers=headers,
             )
 
             try:
-                await response(request.scope, request.receive, send)
+                await sse_response(request.scope, request.receive, send)
             except Exception:
                 logger.exception("Error in replay response")
             finally:
@@ -662,21 +730,34 @@ class HTTPStreamableTransport:
 
         except Exception:
             logger.exception("Error replaying events")
-            response = self._create_error_response(
+            error_response = self._create_error_response(
                 "Error replaying events",
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 INTERNAL_ERROR,
             )
-            await response(request.scope, request.receive, send)
+            await error_response(request.scope, request.receive, send)
 
     @asynccontextmanager
     async def connect(
         self,
-    ) -> AsyncIterator[tuple[MemoryObjectReceiveStream[SessionMessage | Exception], MemoryObjectSendStream[SessionMessage]]]:
-        """Context manager providing read and write streams for connection."""
+    ) -> AsyncIterator[
+        tuple[
+            MemoryObjectReceiveStream[SessionMessage | Exception],
+            MemoryObjectSendStream[str | SessionMessage],
+        ]
+    ]:
+        """Context manager providing read and write streams for connection.
+
+        Creates the in-memory channels used by the transport and starts the
+        `message_router` task responsible for routing outbound messages from
+        the session to the correct per-request stream (or the standalone GET
+        stream identified by `GET_STREAM_KEY`).
+        """
         # Create memory streams
         read_stream_writer, read_stream = anyio.create_memory_object_stream[str | Exception](0)
-        write_stream, write_stream_reader = anyio.create_memory_object_stream[str](0)
+        write_stream, write_stream_reader = anyio.create_memory_object_stream[str | SessionMessage](
+            0
+        )
 
         # Store the streams
         self._read_stream_writer = read_stream_writer
@@ -686,27 +767,25 @@ class HTTPStreamableTransport:
 
         # Start message router
         async with anyio.create_task_group() as tg:
-            async def message_router():
+
+            async def message_router() -> None:
                 try:
                     async for session_message in write_stream_reader:
-                        # Accept either SessionMessage, raw JSON string, or dict
-                        raw_obj = session_message
-                        if isinstance(raw_obj, SessionMessage):
-                            message = raw_obj.message
-                        elif isinstance(raw_obj, str):
-                            try:
-                                message = self._parse_mcp_message(raw_obj)
-                            except Exception:
-                                logger.exception("Failed to parse/validate message; dropping")
+                        # Accept either a SessionMessage wrapper or a raw JSON string
+                        try:
+                            if isinstance(session_message, SessionMessage):
+                                message = session_message.message
+                            elif isinstance(session_message, str):
+                                message = self._parse_mcp_message(session_message)
+                            elif isinstance(session_message, BaseModel):
+                                message = cast(JSONRPCMessage, session_message)
+                            else:
+                                logger.error(
+                                    f"Unsupported outbound message type: {type(session_message)}"
+                                )
                                 continue
-                        elif isinstance(raw_obj, dict):
-                            try:
-                                message = self._parse_mcp_message(raw_obj)
-                            except Exception:
-                                logger.exception("Failed to validate dict message; dropping")
-                                continue
-                        else:
-                            logger.error("Unsupported message type from write_stream; dropping")
+                        except Exception:
+                            logger.exception("Failed to parse outbound message from session")
                             continue
                         target_request_id = None
 
@@ -714,21 +793,25 @@ class HTTPStreamableTransport:
                         if isinstance(message, (JSONRPCResponse, JSONRPCError)):
                             target_request_id = str(message.id)
 
-                        request_stream_id = target_request_id if target_request_id else GET_STREAM_KEY
+                        request_stream_id = (
+                            target_request_id if target_request_id else GET_STREAM_KEY
+                        )
 
                         # Store event if we have an event store
                         event_id = None
                         if self._event_store:
-                            event_id = await self._event_store.store_event(request_stream_id, message)
+                            event_id = await self._event_store.store_event(
+                                request_stream_id, message
+                            )
                             logger.debug(f"Stored {event_id} from {request_stream_id}")
 
                         if request_stream_id in self._request_streams:
                             try:
-                                await self._request_streams[request_stream_id][0].send(EventMessage(message, event_id))
+                                await self._request_streams[request_stream_id][0].send(
+                                    EventMessage(message, event_id)
+                                )
                             except (anyio.BrokenResourceError, anyio.ClosedResourceError):
                                 self._request_streams.pop(request_stream_id, None)
-                        else:
-                            logging.debug(f"Request stream {request_stream_id} not found for message")
                 except Exception:
                     logger.exception("Error in message router")
 

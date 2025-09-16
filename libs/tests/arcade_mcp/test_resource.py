@@ -1,16 +1,16 @@
 """Tests for Resource Manager implementation."""
 
-import pytest
 import asyncio
 
-from arcade_mcp.managers.resource_manager import ResourceManager
+import pytest
 from arcade_mcp.exceptions import NotFoundError
+from arcade_mcp.managers.resource import ResourceManager
 from arcade_mcp.types import (
-    Resource,
-    ResourceTemplate,
-    ResourceContents,
-    TextResourceContents,
     BlobResourceContents,
+    Resource,
+    ResourceContents,
+    ResourceTemplate,
+    TextResourceContents,
 )
 
 
@@ -20,9 +20,7 @@ class TestResourceManager:
     @pytest.fixture
     def resource_manager(self):
         """Create a resource manager instance."""
-        return ResourceManager(
-
-        )
+        return ResourceManager()
 
     @pytest.fixture
     def sample_resource(self):
@@ -31,7 +29,7 @@ class TestResourceManager:
             uri="file:///test.txt",
             name="test.txt",
             description="A test text file",
-            mimeType="text/plain"
+            mimeType="text/plain",
         )
 
     @pytest.fixture
@@ -41,7 +39,7 @@ class TestResourceManager:
             uriTemplate="file:///{path}",
             name="File Template",
             description="Template for file resources",
-            mimeType="text/plain"
+            mimeType="text/plain",
         )
 
     def test_manager_initialization(self):
@@ -94,17 +92,15 @@ class TestResourceManager:
     async def test_resource_handlers(self, resource_manager):
         """Test adding and using resource handlers."""
         resource = Resource(
-            uri="custom://test",
-            name="Custom Resource",
-            description="Resource with custom handler"
+            uri="custom://test", name="Custom Resource", description="Resource with custom handler"
         )
 
         async def custom_handler(uri: str) -> list[ResourceContents]:
-            return [TextResourceContents(
-                uri=uri,
-                text="Custom content for " + uri,
-                mimeType="text/plain"
-            )]
+            return [
+                TextResourceContents(
+                    uri=uri, text="Custom content for " + uri, mimeType="text/plain"
+                )
+            ]
 
         await resource_manager.add_resource(resource, handler=custom_handler)
 
@@ -131,20 +127,15 @@ class TestResourceManager:
     @pytest.mark.asyncio
     async def test_binary_resource_content(self, resource_manager):
         """Test handling binary resource content."""
-        resource = Resource(
-            uri="file:///image.png",
-            name="image.png",
-            mimeType="image/png"
-        )
+        resource = Resource(uri="file:///image.png", name="image.png", mimeType="image/png")
 
         async def image_handler(uri: str) -> list[ResourceContents]:
             import base64
-            png_data = base64.b64encode(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde').decode()
-            return [BlobResourceContents(
-                uri=uri,
-                blob=png_data,
-                mimeType="image/png"
-            )]
+
+            png_data = base64.b64encode(
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+            ).decode()
+            return [BlobResourceContents(uri=uri, blob=png_data, mimeType="image/png")]
 
         await resource_manager.add_resource(resource, handler=image_handler)
 
@@ -157,16 +148,13 @@ class TestResourceManager:
     @pytest.mark.asyncio
     async def test_multiple_resource_contents(self, resource_manager):
         """Test resources that return multiple contents."""
-        resource = Resource(
-            uri="multi://resource",
-            name="Multi Resource"
-        )
+        resource = Resource(uri="multi://resource", name="Multi Resource")
 
         async def multi_handler(uri: str) -> list[ResourceContents]:
             return [
                 TextResourceContents(uri=uri + "#part1", text="Part 1"),
                 TextResourceContents(uri=uri + "#part2", text="Part 2"),
-                BlobResourceContents(uri=uri + "#data", blob="YmluYXJ5")
+                BlobResourceContents(uri=uri + "#data", blob="YmluYXJ5"),
             ]
 
         await resource_manager.add_resource(resource, handler=multi_handler)
@@ -185,9 +173,7 @@ class TestResourceManager:
         resources = []
         for i in range(10):
             resource = Resource(
-                uri=f"file:///{i}.txt",
-                name=f"File {i}",
-                description=f"Test file {i}"
+                uri=f"file:///{i}.txt", name=f"File {i}", description=f"Test file {i}"
             )
             resources.append(resource)
 

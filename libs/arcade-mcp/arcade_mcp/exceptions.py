@@ -4,72 +4,90 @@ MCP Exception Hierarchy
 Provides domain-specific exceptions for better error handling and debugging.
 """
 
+from arcade_core.errors import ToolError  # Re-export for convenience
+
+__all__ = [
+    # Re-exports
+    "ToolError",
+    # Base exceptions
+    "MCPError",
+    "MCPRuntimeError",
+    # Server exceptions
+    "ServerError",
+    "SessionError",
+    "RequestError",
+    "ResponseError",
+    "ServerRequestError",
+    "LifespanError",
+    # Context exceptions
+    "MCPContextError",
+    "NotFoundError",
+    "AuthorizationError",
+    "PromptError",
+    "ResourceError",
+    "TransportError",
+    "ProtocolError",
+]
+
 
 class MCPError(Exception):
     """Base error for all MCP-related exceptions."""
-    pass
 
 
-class ValidationError(MCPError):
-    """Error in validating parameters or return values."""
-    pass
+class MCPRuntimeError(MCPError):
+    """Runtime error for all MCP-related exceptions."""
 
 
-class ToolError(MCPError):
-    """Error in tool operations."""
-    pass
+class ServerError(MCPRuntimeError):
+    """Error in server operations."""
 
 
-class ResourceError(MCPError):
-    """Error in resource operations."""
-    pass
+class SessionError(ServerError):
+    """Error in session management"""
 
 
-class PromptError(MCPError):
-    """Error in prompt operations."""
-    pass
+class RequestError(ServerError):
+    """Error in request processing from client to server"""
 
 
-class NotFoundError(MCPError):
+class ResponseError(ServerError):
+    """Error in request processing from server -> client"""
+
+
+class ServerRequestError(RequestError):
+    """Error in sending request from server -> client initiated by the server"""
+
+
+class LifespanError(ServerError):
+    """Error in lifespan management."""
+
+
+class MCPContextError(MCPError):
+    """Error in context management."""
+
+
+class NotFoundError(MCPContextError):
     """Requested entity not found."""
-    pass
 
 
-class AuthorizationError(MCPError):
+class AuthorizationError(MCPContextError):
     """Authorization failure."""
-    pass
 
 
-class TransportError(MCPError):
-    """Error in transport layer operations."""
-    pass
+class PromptError(MCPContextError):
+    """Error in prompt management."""
 
 
-class SessionError(MCPError):
-    """Error in session management."""
-    pass
+class ResourceError(MCPContextError):
+    """Error in resource management."""
 
 
-class ProtocolError(MCPError):
-    """MCP protocol violation or error."""
-    pass
+# Transport and Protocol Errors
 
 
-class ConfigurationError(MCPError):
-    """Configuration error."""
-    pass
+class TransportError(MCPRuntimeError):
+    """Error in transport layer (stdio, HTTP, etc)."""
 
 
-class DuplicateError(MCPError):
-    """Duplicate entity registration."""
-    pass
-
-
-class TimeoutError(MCPError):
-    """Operation timeout."""
-    pass
-
-
-class DisabledError(MCPError):
-    """Entity is disabled."""
-    pass
+class ProtocolError(MCPRuntimeError):
+    """Error in MCP protocol handling."""

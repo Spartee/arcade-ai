@@ -20,9 +20,13 @@ changes.
 from __future__ import annotations
 
 import asyncio
+import logging
 import weakref
 from contextvars import ContextVar, Token
 from typing import Any, cast
+
+from arcade_core.context import ModelContext as ModelContextProtocol
+from arcade_core.schema import ToolCallOutput, ToolContext
 
 from arcade_mcp.types import (
     ClientCapabilities,
@@ -36,20 +40,24 @@ from arcade_mcp.types import (
     TextContent,
 )
 
-# Import the protocol to ensure we implement it correctly
-try:
-    from arcade_core.context import ModelContext as ModelContextProtocol
-    from arcade_core.schema import ToolCallOutput
-    from arcade_core.schema import ToolContext
-except ImportError:
-    ModelContextProtocol = object
-    ToolCallOutput = object  # type: ignore[assignment]
-    ToolContext = object  # type: ignore[assignment]
-
-
 # Context variable for current model context
-_current_model_context: ContextVar["Context | None"] = ContextVar("model_context", default=None)
+_current_model_context: ContextVar[Context | None] = ContextVar("model_context", default=None)
 _flush_lock = asyncio.Lock()
+
+
+class _ContextComponent:
+    def __init__(self, ctx: Context) -> None:
+        self._ctx = ctx
+
+    @property
+    def server(self) -> Any:
+        return self._ctx.server
+
+    def _require_session(self) -> Any:
+        session = self._ctx._session
+        if session is None:
+            raise ValueError("Session not available")
+        return session
 
 
 class Context:
@@ -102,7 +110,7 @@ class Context:
         """Attach the underlying ToolContext for this model context."""
         self._tool_context = tool_context
 
-    async def __aenter__(self) -> "Context":
+    async def __aenter__(self) -> Context:
         """Enter the context manager and set as current model context."""
         # Set this as current model context
         token = _current_model_context.set(self)
@@ -127,35 +135,35 @@ class Context:
         return self._tool_context
 
     @property
-    def log(self) -> "_Logs":
+    def log(self) -> _Logs:
         return self._log
 
     @property
-    def progress(self) -> "_Progress":
+    def progress(self) -> _Progress:
         return self._progress
 
     @property
-    def resources(self) -> "_Resources":
+    def resources(self) -> _Resources:
         return self._resources
 
     @property
-    def tools(self) -> "_Tools":
+    def tools(self) -> _Tools:
         return self._tools
 
     @property
-    def prompts(self) -> "_Prompts":
+    def prompts(self) -> _Prompts:
         return self._prompts
 
     @property
-    def sampling(self) -> "_Sampling":
+    def sampling(self) -> _Sampling:
         return self._sampling
 
     @property
-    def ui(self) -> "_UI":
+    def ui(self) -> _UI:
         return self._ui
 
     @property
-    def notifications(self) -> "_Notifications":
+    def notifications(self) -> _Notifications:
         return self._notifications
 
     # Properties
@@ -176,11 +184,10 @@ class Context:
         """Check if client has a capability."""
         if self._session is None:
             return False
-        return self._session.check_client_capability(capability)
+        return cast(bool, self._session.check_client_capability(capability))
 
     def _parse_model_preferences(
-        self,
-        prefs: ModelPreferences | str | list[str] | None
+        self, prefs: ModelPreferences | str | list[str] | None
     ) -> ModelPreferences | None:
         """Parse model preferences into standard format."""
         if prefs is None:
@@ -200,7 +207,8 @@ class Context:
             loop = asyncio.get_running_loop()
             if loop and not loop.is_running():
                 return
-            asyncio.create_task(self._flush_notifications())
+            flush_task = asyncio.create_task(self._flush_notifications())
+            flush_task.add_done_callback(lambda _: self._notification_queue.clear())
         except RuntimeError:
             # No event loop
             pass
@@ -217,7 +225,11 @@ class Context:
 
             try:
                 client_ids = []
-                if self._session and hasattr(self._session, 'session_id') and self._session.session_id:
+                if (
+                    self._session
+                    and hasattr(self._session, "session_id")
+                    and self._session.session_id
+                ):
                     client_ids = [self._session.session_id]
 
                 if "notifications/tools/list_changed" in self._notification_queue:
@@ -230,7 +242,7 @@ class Context:
                 self._notification_queue.clear()
             except Exception:
                 # Don't let notification failures break the request
-                pass
+                logging.debug("Failed to send notifications", exc_info=True)
 
 
 # =====================
@@ -249,22 +261,36 @@ class Context:
 # In short: adapters provide the ergonomics tools rely on, while the underlying
 # implementation remains decoupled and replaceable.
 
-class _Logs:
-    def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
 
-    async def log(self, level: str, message: str, logger_name: str | None = None, extra: dict[str, Any] | None = None) -> None:
-        if self._ctx._session is None:
+class _Logs(_ContextComponent):
+    def __init__(self, ctx: Context) -> None:
+        super().__init__(ctx)
+
+    async def log(
+        self,
+        level: str,
+        message: str,
+        logger_name: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        session = self._ctx._session
+        if session is None:
             return
         level_typed = cast(LoggingLevel, level)
         data = {"msg": message, "extra": extra}
-        await self._ctx._session.send_log_message(
+        await session.send_log_message(
             level=level_typed,
             data=data,
             logger=logger_name,
         )
 
-    async def __call__(self, level: str, message: str, logger_name: str | None = None, extra: dict[str, Any] | None = None) -> None:  # compatibility shim
+    async def __call__(
+        self,
+        level: str,
+        message: str,
+        logger_name: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:  # compatibility shim
         await self.log(level, message, logger_name=logger_name, extra=extra)
 
     async def debug(self, message: str, **kwargs: Any) -> None:
@@ -280,19 +306,22 @@ class _Logs:
         await self.log("error", message, **kwargs)
 
 
-class _Progress:
+class _Progress(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
 
-    async def report(self, progress: float, total: float | None = None, message: str | None = None) -> None:
-        if self._ctx._session is None:
+    async def report(
+        self, progress: float, total: float | None = None, message: str | None = None
+    ) -> None:
+        session = self._ctx._session
+        if session is None:
             return
         progress_token = None
-        if hasattr(self._ctx._session, "_request_meta"):
-            progress_token = getattr(self._ctx._session._request_meta, "progressToken", None)
+        if hasattr(session, "_request_meta"):
+            progress_token = getattr(session._request_meta, "progressToken", None)
         if progress_token is None:
             return
-        await self._ctx._session.send_progress_notification(
+        await session.send_progress_notification(
             progress_token=progress_token,
             progress=progress,
             total=total,
@@ -300,14 +329,15 @@ class _Progress:
         )
 
 
-class _Resources:
+class _Resources(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
 
     async def read(self, uri: str) -> list[ResourceContents]:
         if self._ctx.server is None:
             raise ValueError("Context is not available outside of a request")
-        return await self._ctx.server._mcp_read_resource(uri)
+        result = await self._ctx.server._mcp_read_resource(uri)
+        return cast(list[ResourceContents], result)
 
     async def get(self, uri: str) -> ResourceContents:
         contents = await self.read(uri)
@@ -321,19 +351,24 @@ class _Resources:
         result = await self._ctx._session.list_roots()
         return result.roots if hasattr(result, "roots") else []
 
-    async def list(self) -> list[Any]:
-        return await self._ctx.server._resource_manager.list_resources()
+    async def list(self) -> list[Root]:
+        # Convert Resource objects to Root objects
+        resources = await self._ctx.server._resource_manager.list_resources()
+        # Resources have uri and name which map to Root
+        return [Root(uri=r.uri, name=r.name) for r in resources]
 
     async def list_templates(self) -> list[Any]:
-        return await self._ctx.server._resource_manager.list_resource_templates()
+        templates = await self._ctx.server._resource_manager.list_resource_templates()
+        return cast(list[Any], templates)
 
 
-class _Tools:
+class _Tools(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
 
     async def list(self) -> list[Any]:
-        return await self._ctx.server._tool_manager.list_tools()
+        tools = await self._ctx.server._tool_manager.list_tools()
+        return cast(list[Any], tools)
 
     async def call_raw(self, name: str, params: dict[str, Any]) -> ToolCallOutput:
         tool = await self._ctx.server._tool_manager.get_tool(name)
@@ -342,35 +377,41 @@ class _Tools:
         self._ctx.set_tool_context(tool_context)
         func = tool.tool
         if asyncio.iscoroutinefunction(func):
+
             async def async_func(**kw: Any) -> Any:
                 return await func(**kw)
+
         else:
+
             async def async_func(**kw: Any) -> Any:
                 return func(**kw)
-        return await self._ctx.server.executor.run(  # type: ignore[attr-defined]
-            func=async_func,  # type: ignore[arg-type]
+
+        result = await self._ctx.server.executor.run(
+            func=async_func,
             definition=tool.definition,
             input_model=tool.input_model,
             output_model=tool.output_model,
             context=tool_context,
             **params,
         )
+        return cast(ToolCallOutput, result)
 
 
-class _Prompts:
+class _Prompts(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
 
     async def list(self) -> list[Any]:
-        return await self._ctx.server._prompt_manager.list_prompts()
+        prompts = await self._ctx.server._prompt_manager.list_prompts()
+        return cast(list[Any], prompts)
 
     async def get(self, name: str, arguments: dict[str, str] | None = None) -> Any:
         return await self._ctx.server._prompt_manager.get_prompt(name, arguments)
 
 
-class _Sampling:
+class _Sampling(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
 
     async def create_message(
         self,
@@ -387,25 +428,19 @@ class _Sampling:
         # Convert messages to proper format
         if isinstance(messages, str):
             sampling_messages = [
-                SamplingMessage(
-                    content=TextContent(text=messages, type="text"),
-                    role="user"
-                )
+                SamplingMessage(content=TextContent(text=messages, type="text"), role="user")
             ]
         elif isinstance(messages, list):
             sampling_messages = []
             for m in messages:
                 if isinstance(m, str):
                     sampling_messages.append(
-                        SamplingMessage(
-                            content=TextContent(text=m, type="text"),
-                            role="user"
-                        )
+                        SamplingMessage(content=TextContent(text=m, type="text"), role="user")
                     )
                 else:
                     sampling_messages.append(m)
         else:
-            sampling_messages = messages  # type: ignore[assignment]
+            sampling_messages = messages
 
         # Parse model preferences
         parsed_prefs = self._ctx._parse_model_preferences(model_preferences)
@@ -426,51 +461,90 @@ class _Sampling:
         return result.content if hasattr(result, "content") else result
 
 
-class _UI:
+class _UI(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
 
-    async def elicit(self, message: str, schema: dict[str, Any] | None = None) -> ElicitResult:
+    def _validate_elicitation_schema(self, schema: dict[str, Any]) -> None:
+        """Validate that the schema conforms to MCP elicitation restrictions."""
+        if not isinstance(schema, dict):
+            raise TypeError("Schema must be a dictionary")
+
+        if schema.get("type") != "object":
+            raise ValueError("Schema must have type 'object'")
+
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            raise TypeError("Schema properties must be a dictionary")
+
+        # Validate each property
+        for prop_name, prop_schema in properties.items():
+            if not isinstance(prop_schema, dict):
+                raise TypeError(f"Property '{prop_name}' schema must be a dictionary")
+
+            prop_type = prop_schema.get("type")
+            if prop_type not in ["string", "number", "integer", "boolean"]:
+                raise ValueError(
+                    f"Property '{prop_name}' has unsupported type '{prop_type}'. Only primitive types are allowed."
+                )
+
+            # Validate string formats
+            if prop_type == "string" and "format" in prop_schema:
+                allowed_formats = ["email", "uri", "date", "date-time"]
+                if prop_schema["format"] not in allowed_formats:
+                    raise ValueError(
+                        f"Property '{prop_name}' has unsupported format '{prop_schema['format']}'. Allowed: {allowed_formats}"
+                    )
+
+    async def elicit(
+        self, message: str, schema: dict[str, Any] | None = None, timeout: float = 300.0
+    ) -> ElicitResult:
         if self._ctx._session is None:
             raise ValueError("Session not available")
         if schema is None:
             schema = {"type": "object", "properties": {}}
-        return await self._ctx._session.elicit(
+
+        # Validate schema conforms to MCP restrictions
+        self._validate_elicitation_schema(schema)
+
+        result = await self._ctx._session.elicit(
             message=message,
             requested_schema=schema,
+            timeout=timeout,
         )
+        return cast(ElicitResult, result)
 
 
-class _NotificationsTools:
+class _NotificationsTools(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
 
     async def list_changed(self) -> None:
         self._ctx._notification_queue.add("notifications/tools/list_changed")
         self._ctx._try_flush_notifications()
 
 
-class _NotificationsResources:
+class _NotificationsResources(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
 
     async def list_changed(self) -> None:
         self._ctx._notification_queue.add("notifications/resources/list_changed")
         self._ctx._try_flush_notifications()
 
 
-class _NotificationsPrompts:
+class _NotificationsPrompts(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
 
     async def list_changed(self) -> None:
         self._ctx._notification_queue.add("notifications/prompts/list_changed")
         self._ctx._try_flush_notifications()
 
 
-class _Notifications:
+class _Notifications(_ContextComponent):
     def __init__(self, ctx: Context) -> None:
-        self._ctx = ctx
+        super().__init__(ctx)
         self._tools = _NotificationsTools(ctx)
         self._resources = _NotificationsResources(ctx)
         self._prompts = _NotificationsPrompts(ctx)

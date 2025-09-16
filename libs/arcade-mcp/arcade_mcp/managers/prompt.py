@@ -7,10 +7,10 @@ Manages prompts in the MCP server with passive CRUD operations.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Callable
 
 from arcade_mcp.exceptions import NotFoundError, PromptError
-from arcade_mcp.managers.base import ComponentManager
+from arcade_mcp.managers.base import Registry
 from arcade_mcp.types import GetPromptResult, Prompt, PromptMessage
 
 logger = logging.getLogger("arcade.mcp.managers.prompt")
@@ -23,7 +23,7 @@ class PromptHandler:
         self,
         prompt: Prompt,
         handler: Callable[[dict[str, str]], list[PromptMessage]] | None = None,
-    ):
+    ) -> None:
         """
         Initialize prompt handler.
 
@@ -71,30 +71,23 @@ class PromptHandler:
 
         result = self.handler(args)
         if hasattr(result, "__await__"):
-            result = await result  # type: ignore[assignment]
+            result = await result
 
-        return result  # type: ignore[return-value]
+        return result
 
 
-class PromptManager(ComponentManager[PromptHandler]):
+class PromptManager(Registry[PromptHandler]):
     """
     Manages prompts for the MCP server.
-
-    Passive manager: no per-manager locks or start/stop lifecycle.
     """
 
     def __init__(
         self,
-        on_update=None,
-    ):
+    ) -> None:
         """
         Initialize prompt manager.
-
-        Args:
-            on_update: Optional callback invoked when an existing prompt is updated.
         """
-        super().__init__("prompt", on_update)
-        self._prompts: dict[str, PromptHandler] = {}
+        super().__init__("prompt")
 
     async def list_prompts(self) -> list[Prompt]:
         """
@@ -103,9 +96,11 @@ class PromptManager(ComponentManager[PromptHandler]):
         Returns:
             List of prompts
         """
-        return [handler.prompt for handler in self._prompts.values()]
+        return [handler.prompt for handler in self]
 
-    async def get_prompt(self, name: str, arguments: dict[str, str] | None = None) -> GetPromptResult:
+    async def get_prompt(
+        self, name: str, arguments: dict[str, str] | None = None
+    ) -> GetPromptResult:
         """
         Get a prompt by name.
 
@@ -119,10 +114,7 @@ class PromptManager(ComponentManager[PromptHandler]):
         Raises:
             NotFoundError: If prompt not found
         """
-        if name not in self._prompts:
-            raise NotFoundError(f"Prompt '{name}' not found")
-
-        handler = self._prompts[name]
+        handler = self.get(name)
 
         try:
             messages = await handler.get_messages(arguments)
@@ -143,24 +135,13 @@ class PromptManager(ComponentManager[PromptHandler]):
         """
         Add a prompt to the manager.
 
-        If a prompt with the same name exists, equality is checked. If equal,
-        the call is a no-op. If different, the prompt is replaced and on_update
-        is invoked.
-
         Args:
             prompt: Prompt to add
             handler: Optional handler function to generate messages
         """
         prompt_handler = PromptHandler(prompt, handler)
 
-        if prompt.name in self._prompts:
-            existing = self._prompts[prompt.name]
-            if existing == prompt_handler:
-                return
-            self._prompts[prompt.name] = prompt_handler
-            self._on_update(prompt.name, existing, prompt_handler)
-        else:
-            self._prompts[prompt.name] = prompt_handler
+        self.add(prompt.name, prompt_handler)
 
     async def remove_prompt(self, name: str) -> Prompt:
         """
@@ -175,10 +156,7 @@ class PromptManager(ComponentManager[PromptHandler]):
         Raises:
             NotFoundError: If prompt not found
         """
-        if name not in self._prompts:
-            raise NotFoundError(f"Prompt '{name}' not found")
-
-        handler = self._prompts.pop(name)
+        handler = self.remove(name)
         return handler.prompt
 
     async def update_prompt(
@@ -201,12 +179,11 @@ class PromptManager(ComponentManager[PromptHandler]):
         Raises:
             NotFoundError: If prompt not found
         """
-        if name not in self._prompts:
-            raise NotFoundError(f"Prompt '{name}' not found")
-
-        old_handler = self._prompts.pop(name)
+        # Verify the prompt exists
+        self.get(name)
+        
+        # Create new handler and update
         prompt_handler = PromptHandler(prompt, handler)
-        self._prompts[prompt.name] = prompt_handler
+        self.add(prompt.name, prompt_handler)
 
-        self._on_update(prompt.name, old_handler, prompt_handler)
         return prompt

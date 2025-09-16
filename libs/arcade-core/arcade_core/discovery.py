@@ -1,5 +1,5 @@
 """
-Discovery utilities for Arcade MCP.
+Discovery utilities for Arcade Tools.
 
 Provides modular, testable functions to discover toolkits and local tool files,
 load modules, collect tools, and build a ToolCatalog.
@@ -7,90 +7,60 @@ load modules, collect tools, and build a ToolCatalog.
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 from types import ModuleType
 from typing import Any
-import importlib.util
 
 from arcade_core.catalog import ToolCatalog
-from arcade_core.toolkit import Toolkit, ToolkitLoadError
 from arcade_core.parse import get_tools_from_file
+from arcade_core.toolkit import Toolkit, ToolkitLoadError
 from loguru import logger
 
 
-class DiscoveryError(Exception):
-    """Raised when tool discovery fails in a recoverable way."""
-
+DISCOVERY_PATTERNS = ["*.py", "tools/*.py", "arcade_tools/*.py", "tools/**/*.py"]
+FILTER_PATTERNS = [
+    "_test.py",
+    "test_*.py",
+    "__pycache__",
+    "*.lock",
+    "*.egg-info",
+    "*.pyc"
+]
 
 def normalize_package_name(package_name: str) -> str:
     """Normalize a package name for import resolution."""
     return package_name.lower().replace("-", "_")
 
-
 def load_toolkit_from_package(package_name: str, show_packages: bool = False) -> Toolkit:
     """Attempt to load a Toolkit from an installed package name."""
-    try:
-        toolkit = Toolkit.from_package(package_name)
-        if show_packages:
-            logger.info(f"Loading package: {toolkit.name}")
-        return toolkit
-    except ToolkitLoadError as exc:
-        raise DiscoveryError(str(exc)) from exc
-
-
-def load_toolkits_for_option(tool_package: str, show_packages: bool = False) -> list[Toolkit]:
-    """Load toolkits for a specific --tool-package option.
-
-    Tries with arcade_ prefix first, then without.
-    """
-    normalized = normalize_package_name(tool_package)
-    results: list[Toolkit] = []
-
-    # Try prefixed first
-    prefixed = f"arcade_{normalized}"
-    try:
-        results.append(load_toolkit_from_package(prefixed, show_packages))
-        return results
-    except DiscoveryError:
-        pass
-
-    # Fallback to unprefixed
-    try:
-        results.append(load_toolkit_from_package(normalized, show_packages))
-        return results
-    except DiscoveryError as exc:
-        raise DiscoveryError(f"Failed to load package: {exc}") from exc
-
-
-def load_all_installed_toolkits(show_packages: bool = False) -> list[Toolkit]:
-    """Discover all installed Arcade toolkits from the environment."""
-    toolkits = Toolkit.find_all_arcade_toolkits()
-    if not toolkits:
-        raise DiscoveryError("No arcade packages found in environment")
+    toolkit = Toolkit.from_package(package_name)
     if show_packages:
-        for tk in toolkits:
-            logger.info(f"Loading package: {tk.name}")
-    return toolkits
+        logger.info(f"Loading package: {toolkit.name}")
+    return toolkit
+
+
+def load_package(package_name: str, show_packages: bool = False) -> Toolkit:
+    """Load a toolkit for a specific package name.
+
+    Raises ToolkitLoadError if the package is not found.
+    """
+    normalized = normalize_package_name(package_name)
+    try:
+        return load_toolkit_from_package(normalized, show_packages)
+    except ToolkitLoadError:
+        return load_toolkit_from_package(f"arcade_{normalized}", show_packages)
 
 
 def find_candidate_tool_files(root: Path | None = None) -> list[Path]:
     """Find candidate Python files for auto-discovery in common locations."""
     cwd = root or Path.cwd()
-    patterns = ["*.py", "tools/*.py", "arcade_tools/*.py"]
 
     candidates: list[Path] = []
-    for pattern in patterns:
+    for pattern in DISCOVERY_PATTERNS:
         candidates.extend(cwd.glob(pattern))
-
     # Filter out private, cache, and tests
-    filtered = [
-        p for p in candidates
-        if not p.name.startswith("_")
-        and not p.name.endswith("_test.py")
-        and "test_" not in p.name
-        and "__pycache__" not in p.parts
-    ]
-    return filtered
+    return [p for p in candidates if not any(p.match(pattern) for pattern in FILTER_PATTERNS)]
 
 
 def analyze_files_for_tools(files: list[Path]) -> list[tuple[Path, list[str]]]:
@@ -100,12 +70,10 @@ def analyze_files_for_tools(files: list[Path]) -> list[tuple[Path, list[str]]]:
         try:
             names = get_tools_from_file(file_path)
             if names:
-                logger.info(
-                    f"Found {len(names)} tool(s) in {file_path.name}: {', '.join(names)}"
-                )
+                logger.info(f"Found {len(names)} tool(s) in {file_path.name}: {', '.join(names)}")
                 results.append((file_path, names))
-        except Exception as exc:
-            logger.debug(f"Could not parse {file_path}: {exc}")
+        except Exception:
+            logger.exception(f"Could not parse {file_path}")
     return results
 
 
@@ -116,19 +84,19 @@ def load_module_from_path(file_path: Path) -> ModuleType:
         file_path,
     )
     if not spec or not spec.loader:
-        raise DiscoveryError(f"Unable to create import spec for {file_path}")
+        raise ToolkitLoadError(f"Unable to create import spec for {file_path}")
 
     module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(module)  # type: ignore[attr-defined]
-    except Exception as exc:
-        raise DiscoveryError(f"Failed to load {file_path}: {exc}") from exc
+        spec.loader.exec_module(module)
+    except Exception:
+        logger.exception(f"Failed to load {file_path}")
+        raise ToolkitLoadError(f"Failed to load {file_path}")
 
     return module
 
-
 def collect_tools_from_modules(
-    files_with_tools: list[tuple[Path, list[str]]]
+    files_with_tools: list[tuple[Path, list[str]]],
 ) -> list[tuple[Any, ModuleType]]:
     """Load modules and collect the expected tool callables.
 
@@ -140,8 +108,7 @@ def collect_tools_from_modules(
         logger.debug(f"Loading tools from {file_path}...")
         try:
             module = load_module_from_path(file_path)
-        except DiscoveryError as exc:
-            logger.warning(str(exc))
+        except ToolkitLoadError:
             continue
 
         for name in expected_names:
@@ -187,6 +154,49 @@ def add_discovered_tools(
         if module.__name__ not in __import__("sys").modules:
             __import__("sys").modules[module.__name__] = module
         catalog.add_tool(tool_func, toolkit, module)
+
+
+def load_toolkits_for_option(tool_package: str, show_packages: bool = False) -> list[Toolkit]:
+    """
+    Load toolkits for a given package option.
+    
+    Args:
+        tool_package: Package name or comma-separated list of package names
+        show_packages: Whether to log loaded packages
+        
+    Returns:
+        List of loaded toolkits
+    """
+    toolkits = []
+    packages = [p.strip() for p in tool_package.split(",")]
+    
+    for package in packages:
+        try:
+            toolkit = load_package(package, show_packages)
+            toolkits.append(toolkit)
+        except ToolkitLoadError as e:
+            logger.warning(f"Failed to load package '{package}': {e}")
+            
+    return toolkits
+
+
+def load_all_installed_toolkits(show_packages: bool = False) -> list[Toolkit]:
+    """
+    Discover and load all installed arcade toolkits.
+    
+    Args:
+        show_packages: Whether to log loaded packages
+        
+    Returns:
+        List of all installed toolkits
+    """
+    toolkits = Toolkit.find_all_arcade_toolkits()
+    
+    if show_packages:
+        for toolkit in toolkits:
+            logger.info(f"Loading package: {toolkit.name}")
+            
+    return toolkits
 
 
 def discover_tools(

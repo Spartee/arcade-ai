@@ -18,22 +18,22 @@ Usage:
     # Run in development mode with hot reload
     python -m arcade_mcp --reload --debug
 """
-import os
-import signal
+
 import asyncio
 import logging
+import os
 import sys
-from contextlib import asynccontextmanager
 from pathlib import Path
-from dotenv import load_dotenv
-from typing import Any, AsyncGenerator
+from typing import Any
+
 from arcade_core.catalog import ToolCatalog
-from arcade_serve.core.common import HealthCheckResponse
-from arcade_mcp.discovery import discover_tools, DiscoveryError
+from arcade_core.discovery import discover_tools
+from arcade_core.toolkit import ToolkitLoadError
+from dotenv import load_dotenv
+from loguru import logger
+
 from arcade_mcp.server import MCPServer
 from arcade_mcp.settings import MCPSettings
-
-from loguru import logger
 
 
 # Logging setup with Loguru
@@ -61,7 +61,9 @@ def setup_logging(level: str = "INFO", stdio_mode: bool = False) -> None:
     if level == "DEBUG":
         format_str = "<level>{level: <8}</level> | <green>{time:HH:mm:ss}</green> | <cyan>{name}:{line}</cyan> | <level>{message}</level>"
     else:
-        format_str = "<level>{level: <8}</level> | <green>{time:HH:mm:ss}</green> | <level>{message}</level>"
+        format_str = (
+            "<level>{level: <8}</level> | <green>{time:HH:mm:ss}</green> | <level>{message}</level>"
+        )
 
     logger.add(
         sink,
@@ -95,7 +97,7 @@ def initialize_tool_catalog(
             server_name=server_name,
             server_version=server_version,
         )
-    except DiscoveryError as exc:
+    except ToolkitLoadError as exc:
         logger.error(str(exc))
         sys.exit(1)
 
@@ -106,6 +108,7 @@ def initialize_tool_catalog(
 
     logger.info(f"Total tools loaded: {total_tools}")
     return catalog
+
 
 async def run_stdio_server(
     catalog: ToolCatalog,
@@ -120,11 +123,26 @@ async def run_stdio_server(
     # Ensure env from provided .env is loaded for stdio runs as well
     if env_file:
         load_dotenv(env_file)
+        logger.debug(f"Loaded environment variables from --env-file={env_file}")
     settings = MCPSettings.from_env()
     if debug:
         settings.debug = True
         settings.middleware.enable_logging = True
         settings.middleware.log_level = "DEBUG"
+
+    # Debug log settings and env var names (without values)
+    try:
+        tool_env_keys = sorted(settings.tool_secrets().keys())
+        logger.debug(
+            f"Arcade settings: \n\
+                ARCADE_ENVIRONMENT={settings.arcade.environment} \n\
+                ARCADE_API_URL={settings.arcade.api_url}, \n\
+                ARCADE_USER_ID={settings.arcade.user_id}, \n\
+                api_key_present - {bool(settings.arcade.api_key)}"
+        )
+        logger.debug(f"Tool environment variable names available to tools: {tool_env_keys}")
+    except Exception as e:
+        logger.debug(f"Unable to log settings/tool env keys: {e}")
 
     # Create server
     server = MCPServer(
@@ -138,7 +156,7 @@ async def run_stdio_server(
 
     try:
         # Start server and transport
-        await server._start()
+        await server.start()
         await transport.start()
 
         # Run connection
@@ -158,8 +176,7 @@ async def run_stdio_server(
         try:
             await transport.stop()
         finally:
-            await server._stop()
-
+            await server.stop()
 
 
 def main() -> None:
@@ -195,7 +212,7 @@ Auto-discovery looks for Python files with @tool decorated functions in:
   - Current directory (*.py)
   - tools/ subdirectory
   - arcade_tools/ subdirectory
-        """
+        """,
     )
 
     # Transport selection (positional for backwards compatibility)
@@ -220,12 +237,15 @@ Auto-discovery looks for Python files with @tool decorated functions in:
         help="Port to bind to (HTTP mode only)",
     )
     parser.add_argument(
-        "--tool-package", "--package", "-p",
+        "--tool-package",
+        "--package",
+        "-p",
         dest="tool_package",
         help="Specific tool package to load (e.g., 'github' for arcade-github)",
     )
     parser.add_argument(
-        "--discover-installed", "--all",
+        "--discover-installed",
+        "--all",
         action="store_true",
         help="Discover all installed arcade tool packages",
     )
@@ -265,7 +285,6 @@ Auto-discovery looks for Python files with @tool decorated functions in:
 
     # Change working directory if specified
     if args.cwd:
-
         cwd_path = Path(args.cwd).resolve()
         if not cwd_path.exists():
             print(f"Error: Directory does not exist: {args.cwd}", file=sys.stderr)
@@ -304,10 +323,13 @@ Auto-discovery looks for Python files with @tool decorated functions in:
     try:
         if args.transport == "stdio":
             logger.info("Starting MCP server with stdio transport")
-            asyncio.run(run_stdio_server(catalog, debug=args.debug, env_file=args.env_file, **server_kwargs))
+            asyncio.run(
+                run_stdio_server(catalog, debug=args.debug, env_file=args.env_file, **server_kwargs)
+            )
         else:
             logger.info(f"Starting MCP server with HTTP transport on {args.host}:{args.port}")
             from arcade_mcp.worker import run_arcade_mcp
+
             run_arcade_mcp(
                 catalog=catalog,
                 host=args.host,

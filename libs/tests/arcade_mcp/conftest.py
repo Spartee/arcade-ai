@@ -1,27 +1,27 @@
 """Shared fixtures and utilities for arcade-mcp tests."""
 
 import asyncio
-from typing import Any, AsyncGenerator, Annotated
+from collections.abc import AsyncGenerator
+from typing import Annotated, Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
-from arcade_core.catalog import MaterializedTool, ToolCatalog, ToolMeta
+from arcade_core.catalog import MaterializedTool, ToolCatalog, ToolMeta, create_func_models
 from arcade_core.schema import (
+    InputParameter,
     ToolDefinition,
     ToolInput,
-    ToolOutput,
     ToolkitDefinition,
+    ToolOutput,
     ToolRequirements,
-    InputParameter,
     ValueSchema,
 )
-from arcade_core.catalog import create_func_models
-from arcade_tdk import tool
-from arcade_mcp.server import MCPServer
-from arcade_mcp.settings import MCPSettings
 from arcade_mcp.context import Context
+from arcade_mcp.server import MCPServer
 from arcade_mcp.session import ServerSession
+from arcade_mcp.settings import MCPSettings
+from arcade_tdk import tool
 
 
 @pytest.fixture
@@ -39,36 +39,33 @@ def sample_tool_def() -> ToolDefinition:
         name="test_tool",
         fully_qualified_name="TestToolkit.test_tool",
         description="A test tool",
-        toolkit=ToolkitDefinition(
-            name="TestToolkit",
-            description="Test toolkit",
-            version="1.0.0"
-        ),
+        toolkit=ToolkitDefinition(name="TestToolkit", description="Test toolkit", version="1.0.0"),
         input=ToolInput(
             parameters=[
                 InputParameter(
                     name="text",
                     required=True,
                     description="Input text",
-                    value_schema=ValueSchema(val_type="string")
+                    value_schema=ValueSchema(val_type="string"),
                 )
             ]
         ),
-        output=ToolOutput(
-            description="Tool output",
-            value_schema=ValueSchema(val_type="string")
-        ),
-        requirements=ToolRequirements()
+        output=ToolOutput(description="Tool output", value_schema=ValueSchema(val_type="string")),
+        requirements=ToolRequirements(),
     )
 
 
 @pytest.fixture
 def sample_tool_func():
     """Create a sample tool function."""
+
     @tool
-    def sample_tool(text: Annotated[str, "Input text to echo"]) -> Annotated[str, "Echoed text result"]:
+    def sample_tool(
+        text: Annotated[str, "Input text to echo"],
+    ) -> Annotated[str, "Echoed text result"]:
         """Echo input text back to the caller."""
         return f"Echo: {text}"
+
     return sample_tool
 
 
@@ -113,9 +110,9 @@ async def mcp_server(tool_catalog, mcp_settings) -> AsyncGenerator[MCPServer, No
         version="1.0.0",
         settings=mcp_settings,
     )
-    await server._start()
+    await server.start()
     yield server
-    await server._stop()
+    await server.stop()
 
 
 @pytest.fixture
@@ -163,42 +160,19 @@ def sample_messages() -> dict[str, Any]:
             "method": "initialize",
             "params": {
                 "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {},
-                    "sampling": {}
-                },
-                "clientInfo": {
-                    "name": "test-client",
-                    "version": "1.0.0"
-                }
-            }
+                "capabilities": {"tools": {}, "sampling": {}},
+                "clientInfo": {"name": "test-client", "version": "1.0.0"},
+            },
         },
-        "initialized": {
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        },
-        "list_tools": {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {}
-        },
+        "initialized": {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        "list_tools": {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         "call_tool": {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": {
-                "name": "TestToolkit.test_tool",
-                "arguments": {
-                    "text": "Hello, world!"
-                }
-            }
+            "params": {"name": "TestToolkit.test_tool", "arguments": {"text": "Hello, world!"}},
         },
-        "ping": {
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "ping"
-        }
+        "ping": {"jsonrpc": "2.0", "id": 4, "method": "ping"},
     }
 
 

@@ -1,7 +1,7 @@
 """MCP Component Managers."""
 
-from arcade_mcp.managers.tool_manager import ToolManager
-from arcade_mcp.managers.resource_manager import ResourceManager
-from arcade_mcp.managers.prompt_manager import PromptManager
+from arcade_mcp.managers.prompt import PromptManager
+from arcade_mcp.managers.resource import ResourceManager
+from arcade_mcp.managers.tool import ToolManager
 
-__all__ = ["ToolManager", "ResourceManager", "PromptManager"]
+__all__ = ["PromptManager", "ResourceManager", "ToolManager"]

@@ -7,20 +7,20 @@ Provides a clean, minimal API for building MCP servers with lazy initialization.
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable, TypeVar
-from arcade_mcp.worker import run_arcade_mcp
+from typing import Any, Callable, Literal, TypeVar
 
 from arcade_core.catalog import ToolCatalog
-from arcade_mcp.exceptions import TransportError
-from arcade_tdk import Toolkit
 from arcade_tdk.tool import tool as tool_decorator
 from loguru import logger
-from typing import Literal
+
+from arcade_mcp.exceptions import ServerError
+from arcade_mcp.worker import run_arcade_mcp
 
 P = TypeVar("P")
 T = TypeVar("T")
 
 TransportType = Literal["http", "stdio"]
+
 
 class MCPApp:
     """
@@ -131,7 +131,7 @@ class MCPApp:
             ```
         """
         # Wrap with tool decorator if not already wrapped
-        if not hasattr(func, '__tool_name__'):
+        if not hasattr(func, "__tool_name__"):
             func = tool_decorator(func)
 
         # Add to catalog with toolkit name
@@ -141,7 +141,7 @@ class MCPApp:
         return func
 
     def tool(self, func: Callable[P, T]) -> Callable[P, T]:
-        """Decorator to add a tool to the server.
+        """Add a tool to the server from a function.
 
         Tools must be decorated with @tool to be added to the server.
         They also need to have all parameters annotated with a type
@@ -219,13 +219,18 @@ class MCPApp:
                 **self.server_kwargs,
             )
         elif transport == "stdio":
+            import asyncio
+
             from arcade_mcp.__main__ import run_stdio_server
-            run_stdio_server(
-                catalog=self._catalog,
-                host=host,
-                port=port,
-                reload=reload,
-                **self.server_kwargs,
+
+            asyncio.run(
+                run_stdio_server(
+                    catalog=self._catalog,
+                    host=host,
+                    port=port,
+                    reload=reload,
+                    **self.server_kwargs,
+                )
             )
         else:
-            raise TransportError(f"Invalid transport: {transport}")
+            raise ServerError(f"Invalid transport: {transport}")

@@ -6,41 +6,42 @@ Manages per-session state and provides session-level operations.
 
 import asyncio
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from enum import Enum
 from typing import Any
 
 from arcade_mcp.context import Context
-from arcade_mcp.exceptions import SessionError, ProtocolError
+from arcade_mcp.exceptions import ProtocolError, SessionError
 from arcade_mcp.types import (
-    ClientCapabilities,
-    InitializeParams,
-    JSONRPCMessage,
-    JSONRPCRequest,
-    JSONRPCResponse,
-    JSONRPCError,
-    LoggingLevel,
-    ProgressNotification,
-    ProgressNotificationParams,
-    LoggingMessageNotification,
-    LoggingMessageParams,
-    ToolListChangedNotification,
-    ResourceListChangedNotification,
-    PromptListChangedNotification,
-    CreateMessageRequest,
-    CreateMessageResult,
-    ListRootsRequest,
-    ListRootsResult,
-    CompleteRequest,
-    CompleteResult,
     CancelledNotification,
     CancelledParams,
+    ClientCapabilities,
+    CompleteResult,
+    CreateMessageResult,
+    ElicitResult,
+    InitializeParams,
+    JSONRPCError,
+    JSONRPCMessage,
+    JSONRPCRequest,
+    ListRootsResult,
+    LoggingLevel,
+    LoggingMessageNotification,
+    LoggingMessageParams,
+    ProgressNotification,
+    ProgressNotificationParams,
+    PromptListChangedNotification,
+    ResourceListChangedNotification,
+    ToolListChangedNotification,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class InitializationState(Enum):
     """Session initialization states."""
+
     NOT_INITIALIZED = 1
     INITIALIZING = 2
     INITIALIZED = 3
@@ -68,7 +69,7 @@ class RequestManager:
         self,
         method: str,
         params: dict[str, Any] | None = None,
-        timeout: float = 60.0,
+        timeout: float = 400.0,
     ) -> Any:
         """
         Send a request to the client and wait for response.
@@ -82,7 +83,7 @@ class RequestManager:
             Response result
 
         Raises:
-            TimeoutError: If request times out
+            MCPTimeoutError: If request times out
             ProtocolError: If response is an error
         """
         if self._closed.is_set():
@@ -106,10 +107,12 @@ class RequestManager:
         try:
             # Send request
             message = request.model_dump_json(exclude_none=True) + "\n"
+            logger.debug(f"Sending server->client request method={method} id={request_id}")
             await self._write_stream.send(message)
 
             # Wait for response
             result = await asyncio.wait_for(future, timeout=timeout)
+            logger.debug(f"Received response for id={request_id} method={method}")
             return result
 
         finally:
@@ -129,6 +132,7 @@ class RequestManager:
             return
         request_id = message.get("id")
         if not request_id:
+            logger.debug("Received response without id; ignoring")
             return
 
         async with self._lock:
@@ -136,11 +140,15 @@ class RequestManager:
 
         if future and not future.done():
             if "error" in message:
-                future.set_exception(
-                    ProtocolError(f"Request failed: {message['error']}")
-                )
+                logger.debug(f"Response id={request_id} contains error; propagating")
+                future.set_exception(ProtocolError(f"Request failed: {message['error']}"))
             else:
+                logger.debug(f"Correlated response id={request_id} -> completing future")
                 future.set_result(message.get("result"))
+        else:
+            logger.debug(
+                f"No pending future for response id={request_id}; possibly late or mismatched"
+            )
 
     async def cancel_all(self, reason: str | None = None) -> None:
         """Cancel all pending requests and notify the client.
@@ -174,7 +182,9 @@ class RequestManager:
                 await self._write_stream.send(message)
         except Exception:
             # Swallow transport errors during shutdown; proceed to cancel futures
-            pass
+            logging.debug(
+                "Failed to send cancellation notifications during shutdown", exc_info=True
+            )
 
         # Cancel futures so any waiters are released
         for _request_id, future in pending_items:
@@ -258,16 +268,29 @@ class ServerSession:
 
         # Check specific capabilities
         # Use hasattr to check for attributes that might be in extra fields
-        if hasattr(capability, 'tools') and capability.tools and not (hasattr(client_caps, 'tools') and client_caps.tools):
+        if (
+            hasattr(capability, "tools")
+            and capability.tools
+            and not (hasattr(client_caps, "tools") and client_caps.tools)
+        ):
             return False
-        if hasattr(capability, 'resources') and capability.resources and not (hasattr(client_caps, 'resources') and client_caps.resources):
+        if (
+            hasattr(capability, "resources")
+            and capability.resources
+            and not (hasattr(client_caps, "resources") and client_caps.resources)
+        ):
             return False
-        if hasattr(capability, 'prompts') and capability.prompts and not (hasattr(client_caps, 'prompts') and client_caps.prompts):
+        if (
+            hasattr(capability, "prompts")
+            and capability.prompts
+            and not (hasattr(client_caps, "prompts") and client_caps.prompts)
+        ):
             return False
-        if hasattr(capability, 'logging') and capability.logging and not (hasattr(client_caps, 'logging') and client_caps.logging):
-            return False
-
-        return True
+        return not (
+            hasattr(capability, "logging")
+            and capability.logging
+            and not (hasattr(client_caps, "logging") and client_caps.logging)
+        )
 
     async def run(self) -> None:
         """
@@ -285,7 +308,7 @@ class ServerSession:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            await self.server.logger.error(f"Session error: {e}")
+            await self.server.logger.exception("Session error")
             raise SessionError(f"Session error: {e}") from e
         finally:
             # Cleanup
@@ -302,6 +325,9 @@ class ServerSession:
             # Check if it's a response to our request
             if "id" in data and "method" not in data:
                 if self._request_manager:
+                    logger.debug(
+                        f"Session received response message id={data.get('id')} -> routing to RequestManager"
+                    )
                     await self._request_manager.handle_response(data)
                 return
 
@@ -330,7 +356,7 @@ class ServerSession:
             await self._send_error_response(
                 None,
                 -32603,
-                f"Internal error: {str(e)}",
+                f"Internal error: {e!s}",
             )
 
     async def _send_error_response(
@@ -389,7 +415,6 @@ class ServerSession:
         level: LoggingLevel,
         data: Any,
         logger: str | None = None,
-        related_request_id: str | None = None,
     ) -> None:
         """Send a log message notification."""
         notification = LoggingMessageNotification(
@@ -521,6 +546,42 @@ class ServerSession:
         )
 
         return CompleteResult(**result)
+
+    async def elicit(
+        self,
+        message: str,
+        requested_schema: dict[str, Any] | None = None,
+        timeout: float = 300.0,
+    ) -> ElicitResult:
+        """
+        Send an elicitation request to the client.
+
+        Args:
+            message: Elicitation message to display
+            requested_schema: JSON schema for the requested response
+            timeout: Request timeout
+
+        Returns:
+            Elicitation result
+        """
+        if not self._request_manager:
+            raise SessionError("Cannot send requests without request manager")
+
+        params = {
+            "message": message,
+        }
+
+        # Add schema if provided
+        if requested_schema is not None:
+            params["requestedSchema"] = requested_schema
+
+        result = await self._request_manager.send_request(
+            "elicitation/create",
+            params,
+            timeout,
+        )
+
+        return ElicitResult(**result)
 
     # Context management
     async def create_request_context(self) -> Context:

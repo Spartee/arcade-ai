@@ -1,15 +1,15 @@
 """Tests for Prompt Manager implementation."""
 
-import pytest
 import asyncio
 
-from arcade_mcp.managers.prompt_manager import PromptManager
+import pytest
 from arcade_mcp.exceptions import NotFoundError, PromptError
+from arcade_mcp.managers.prompt import PromptManager
 from arcade_mcp.types import (
+    GetPromptResult,
     Prompt,
     PromptArgument,
     PromptMessage,
-    GetPromptResult,
 )
 
 
@@ -28,22 +28,17 @@ class TestPromptManager:
             name="greeting",
             description="A greeting prompt",
             arguments=[
+                PromptArgument(name="name", description="The name to greet", required=True),
                 PromptArgument(
-                    name="name",
-                    description="The name to greet",
-                    required=True
+                    name="formal", description="Whether to use formal greeting", required=False
                 ),
-                PromptArgument(
-                    name="formal",
-                    description="Whether to use formal greeting",
-                    required=False
-                )
-            ]
+            ],
         )
 
     @pytest.fixture
     def prompt_function(self):
         """Create a prompt function."""
+
         async def greeting_prompt(args: dict[str, str]) -> list[PromptMessage]:
             name = args.get("name", "")
             formal_arg = args.get("formal", "false")
@@ -54,12 +49,7 @@ class TestPromptManager:
             else:
                 text = f"Hey {name}! What's up?"
 
-            return [
-                PromptMessage(
-                    role="assistant",
-                    content={"type": "text", "text": text}
-                )
-            ]
+            return [PromptMessage(role="assistant", content={"type": "text", "text": text})]
 
         return greeting_prompt
 
@@ -116,7 +106,9 @@ class TestPromptManager:
         assert "Hey Bob!" in result.messages[0].content["text"]
 
     @pytest.mark.asyncio
-    async def test_get_prompt_missing_required_args(self, prompt_manager, sample_prompt, prompt_function):
+    async def test_get_prompt_missing_required_args(
+        self, prompt_manager, sample_prompt, prompt_function
+    ):
         """Test getting prompt without required arguments."""
         await prompt_manager.add_prompt(sample_prompt, prompt_function)
 
@@ -132,29 +124,16 @@ class TestPromptManager:
     @pytest.mark.asyncio
     async def test_prompt_with_multiple_messages(self, prompt_manager):
         """Test prompt that returns multiple messages."""
-        prompt = Prompt(
-            name="conversation",
-            description="A conversation prompt"
-        )
+        prompt = Prompt(name="conversation", description="A conversation prompt")
 
         async def conversation_prompt(args: dict[str, str]) -> list[PromptMessage]:
             return [
+                PromptMessage(role="user", content={"type": "text", "text": "Hello!"}),
+                PromptMessage(role="assistant", content={"type": "text", "text": "Hi there!"}),
+                PromptMessage(role="user", content={"type": "text", "text": "How are you?"}),
                 PromptMessage(
-                    role="user",
-                    content={"type": "text", "text": "Hello!"}
+                    role="assistant", content={"type": "text", "text": "I'm doing well, thanks!"}
                 ),
-                PromptMessage(
-                    role="assistant",
-                    content={"type": "text", "text": "Hi there!"}
-                ),
-                PromptMessage(
-                    role="user",
-                    content={"type": "text", "text": "How are you?"}
-                ),
-                PromptMessage(
-                    role="assistant",
-                    content={"type": "text", "text": "I'm doing well, thanks!"}
-                )
             ]
 
         await prompt_manager.add_prompt(prompt, conversation_prompt)
@@ -171,9 +150,7 @@ class TestPromptManager:
         prompt = Prompt(
             name="image_analysis",
             description="Analyze an image",
-            arguments=[
-                PromptArgument(name="image_url", required=True)
-            ]
+            arguments=[PromptArgument(name="image_url", required=True)],
         )
 
         async def image_prompt(args: dict[str, str]) -> list[PromptMessage]:
@@ -181,24 +158,18 @@ class TestPromptManager:
             return [
                 PromptMessage(
                     role="user",
-                    content={
-                        "type": "image",
-                        "data": image_url,
-                        "mimeType": "image/jpeg"
-                    }
+                    content={"type": "image", "data": image_url, "mimeType": "image/jpeg"},
                 ),
                 PromptMessage(
-                    role="user",
-                    content={
-                        "type": "text",
-                        "text": "Please analyze this image"
-                    }
-                )
+                    role="user", content={"type": "text", "text": "Please analyze this image"}
+                ),
             ]
 
         await prompt_manager.add_prompt(prompt, image_prompt)
 
-        result = await prompt_manager.get_prompt("image_analysis", {"image_url": "http://example.com/image.jpg"})
+        result = await prompt_manager.get_prompt(
+            "image_analysis", {"image_url": "http://example.com/image.jpg"}
+        )
 
         assert len(result.messages) == 2
         assert result.messages[0].content["type"] == "image"
@@ -207,10 +178,7 @@ class TestPromptManager:
     @pytest.mark.asyncio
     async def test_prompt_with_embedded_resource(self, prompt_manager):
         """Test prompt with embedded resources."""
-        prompt = Prompt(
-            name="with_resource",
-            description="Prompt with embedded resource"
-        )
+        prompt = Prompt(name="with_resource", description="Prompt with embedded resource")
 
         async def resource_prompt(args: dict[str, str]) -> list[PromptMessage]:
             return [
@@ -218,8 +186,8 @@ class TestPromptManager:
                     role="user",
                     content={
                         "type": "resource",
-                        "resource": {"uri": "file:///data.txt", "text": "Sample data"}
-                    }
+                        "resource": {"uri": "file:///data.txt", "text": "Sample data"},
+                    },
                 )
             ]
 
@@ -235,16 +203,14 @@ class TestPromptManager:
         """Test concurrent prompt operations."""
         prompts = []
         for i in range(10):
-            prompt = Prompt(
-                name=f"prompt_{i}",
-                description=f"Prompt {i}"
-            )
+            prompt = Prompt(name=f"prompt_{i}", description=f"Prompt {i}")
 
             async def func(args: dict[str, str], idx=i):
-                return [PromptMessage(
-                    role="assistant",
-                    content={"type": "text", "text": f"Response {idx}"}
-                )]
+                return [
+                    PromptMessage(
+                        role="assistant", content={"type": "text", "text": f"Response {idx}"}
+                    )
+                ]
 
             prompts.append((prompt, func))
 

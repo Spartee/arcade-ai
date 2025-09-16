@@ -1,29 +1,25 @@
 """Tests for MCP content conversion utilities."""
 
-import pytest
 import base64
 import json
 from typing import Annotated
 
-from arcade_mcp.convert import convert_to_mcp_content, create_mcp_tool
-from arcade_core.catalog import MaterializedTool, ToolMeta
+import pytest
+from arcade_core.catalog import MaterializedTool, ToolMeta, create_func_models
 from arcade_core.schema import (
+    InputParameter,
     ToolDefinition,
     ToolInput,
-    ToolOutput,
     ToolkitDefinition,
+    ToolOutput,
     ToolRequirements,
-    InputParameter,
     ValueSchema,
-    FullyQualifiedName,
 )
-from arcade_core.catalog import create_func_models
+from arcade_mcp.convert import convert_to_mcp_content, create_mcp_tool
 from arcade_tdk import tool
 
 # Small PNG header (1x1 transparent pixel) used for byte-image param tests
-PNG_BYTES = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
-)
+PNG_BYTES = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
 
 
 class TestConvertToMCPContent:
@@ -104,6 +100,7 @@ class TestConvertToMCPContent:
 
     def test_convert_custom_objects(self):
         """Test converting custom objects."""
+
         class CustomObject:
             def __str__(self):
                 return "CustomObject instance"
@@ -159,13 +156,14 @@ class TestCreateMCPTool:
     @pytest.fixture
     def materialized_tool(self, sample_tool_def):
         """Create a materialized tool."""
+
         @tool
         def calculate(
-            expression: Annotated[str, "Math expression"],
+            expression: Annotated[str, "Math expression"] = "1 + 1",
             precision: Annotated[int, "Decimal precision"] = 2,
         ) -> Annotated[float, "Calculation result"]:
             """Perform a calculation."""
-            return round(eval(expression), precision)
+            return round(eval(expression), precision)  # noqa: S307
 
         input_model, output_model = create_func_models(calculate)
         meta = ToolMeta(module=calculate.__module__, toolkit=sample_tool_def.toolkit.name)

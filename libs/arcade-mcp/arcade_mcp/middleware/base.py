@@ -4,24 +4,24 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any, Generic, Literal, Protocol, TypeVar, runtime_checkable
+from typing import Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from arcade_mcp.types import (
     CallToolParams,
+    CallToolResult,
     GetPromptParams,
     GetPromptResult,
+    JSONRPCMessage,
     ListPromptsRequest,
     ListResourcesRequest,
     ListResourceTemplatesRequest,
     ListToolsRequest,
-    JSONRPCMessage,
     Prompt,
+    ReadResourceParams,
+    ReadResourceResult,
     Resource,
     ResourceTemplate,
     Tool,
-    ReadResourceParams,
-    ReadResourceResult,
-    CallToolResult,
 )
 
 T = TypeVar("T")
@@ -32,8 +32,7 @@ R = TypeVar("R", covariant=True)
 class CallNext(Protocol[T, R]):
     """Protocol for the next handler in the middleware chain."""
 
-    def __call__(self, context: "MiddlewareContext[T]") -> Awaitable[R]:
-        ...
+    def __call__(self, context: "MiddlewareContext[T]") -> Awaitable[R]: ...
 
 
 @dataclass(kw_only=True)
@@ -216,21 +215,27 @@ def compose_middleware(
     The middleware are applied in reverse order, so the first middleware
     in the list is the outermost (runs first on request, last on response).
     """
+
     async def composed(
         context: MiddlewareContext[T],
         call_next: CallNext[T, R],
     ) -> R:
-        # Build the chain in reverse order
-        handler = call_next
+        # Build the chain in reverse order into a CallNext[T, R]
+        current: CallNext[T, R] = call_next
+
         for mw in reversed(middleware):
-            # Create a closure that captures the current handler
-            async def make_handler(
+
+            async def wrapper(
                 ctx: MiddlewareContext[T],
-                next_handler: CallNext[T, Any] = handler,
-                middleware: Middleware = mw,
-            ) -> Any:
-                return await middleware(ctx, next_handler)
-            handler = make_handler
-        return await handler(context)
+                next_handler: CallNext[T, R] = current,
+                m: Middleware = mw,
+            ) -> R:
+                result = await m(ctx, next_handler)
+                return cast(R, result)
+
+            # wrapper conforms to CallNext[T, R]
+            current = wrapper  # type: ignore[assignment]
+
+        return await current(context)
 
     return composed

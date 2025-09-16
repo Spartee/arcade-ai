@@ -16,12 +16,12 @@ from arcade_serve.core.components import (
 
 __all__ = [
     "BaseWorker",
+    "CallToolComponent",
+    "CatalogComponent",
+    "HealthCheckComponent",
+    "RequestData",
+    "ResponseData",
     "Router",
     "Worker",
     "WorkerComponent",
-    "RequestData",
-    "ResponseData",
-    "CatalogComponent",
-    "CallToolComponent",
-    "HealthCheckComponent",
 ]

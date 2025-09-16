@@ -15,28 +15,26 @@ will be provided before removal.
 
 from __future__ import annotations
 
-import os
-import warnings
-
-
 from arcade_core.context import (
+    LogsContext,
     ModelContext,
     NotificationsContext,
+    ProgressContext,
     PromptsContext,
     ResourcesContext,
     SamplingContext,
     ToolsContext,
     UIContext,
-    LogsContext,
-    ProgressContext,
 )
 from arcade_core.schema import ToolContext
 
 # Optional runtime provider import (guarded to avoid hard dependency at import time)
 try:
-    from arcade_mcp.context import get_current_model_context as _tdk_get_current_model_context  # type: ignore
+    from arcade_mcp.context import (
+        get_current_model_context as _tdk_get_current_model_context,
+    )
 except Exception:  # pragma: no cover - optional dependency
-    _tdk_get_current_model_context = None  # type: ignore[assignment]
+    _tdk_get_current_model_context = None
 
 
 def _get_model_context() -> ModelContext:
@@ -48,12 +46,12 @@ def _get_model_context() -> ModelContext:
         raise RuntimeError(
             "Model context runtime provider not available. Did you include arcade-mcp and set the current context?"
         )
-    ctx = _tdk_get_current_model_context()
-    if ctx is None:
-        raise RuntimeError(
-            "No current model context is set. This should be set by the engine during tool execution."
-        )
-    return ctx
+    ctx: Context | None = _tdk_get_current_model_context()
+    if ctx:
+        return ctx
+    raise RuntimeError(
+        "No current model context is set. This should be set by the engine during tool execution."
+    )
 
 
 class Context(ToolContext):
@@ -99,11 +97,11 @@ class Context(ToolContext):
 
     # Identity passthrough via model context
     @property
-    def request_id(self) -> str | None:  # type: ignore[override]
+    def request_id(self) -> str | None:
         return _get_model_context().request_id
 
     @property
-    def session_id(self) -> str | None:  # type: ignore[override]
+    def session_id(self) -> str | None:
         return _get_model_context().session_id
 
     # Access to underlying tool context (self)

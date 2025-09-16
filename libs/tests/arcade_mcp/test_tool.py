@@ -1,10 +1,8 @@
 """Tests for Tool Manager implementation."""
 
 import pytest
-import asyncio
-
-from arcade_mcp.managers.tool_manager import ToolManager
 from arcade_mcp.exceptions import NotFoundError
+from arcade_mcp.managers.tool import ToolManager
 from arcade_mcp.types import Tool
 
 
@@ -57,7 +55,7 @@ class TestToolManager:
 
         # Try to get non-existent tool
         with pytest.raises(NotFoundError):
-            await tool_manager.get_tool("NonExistent.tool")
+            await tool_manager.get_tool("NonExistent_tool")
 
     @pytest.mark.asyncio
     async def test_remove_tool(self, tool_manager, materialized_tool):
@@ -75,7 +73,7 @@ class TestToolManager:
     async def test_remove_nonexistent_tool(self, tool_manager):
         """Test removing non-existent tool."""
         with pytest.raises(NotFoundError):
-            await tool_manager.remove_tool("NonExistent.tool")
+            await tool_manager.remove_tool("NonExistent_tool")
 
     @pytest.mark.asyncio
     async def test_tool_conversion(self, tool_manager, materialized_tool):
@@ -93,4 +91,3 @@ class TestToolManager:
         schema = tool.inputSchema
         assert schema["type"] == "object"
         assert "properties" in schema
-

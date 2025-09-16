@@ -36,7 +36,7 @@ def display_tools_table(tools: list[ToolDefinition]) -> None:
     console.print(table)
 
 
-def display_tool_details(tool: ToolDefinition, worker: bool = False) -> None:  # noqa: C901
+def display_tool_details(tool: ToolDefinition, worker: bool = False) -> None:
     """
     Display detailed information about a specific tool using multiple panels.
 

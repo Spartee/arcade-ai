@@ -60,6 +60,7 @@ ignore = [
 
 [lint.per-file-ignores]
 "**/tests/*" = ["S101"]
+"libs/**/*.py" = ["C901"]
 
 [format]
 preview = true

@@ -92,6 +92,7 @@ class JSONRPCError(JSONRPCMessage):
 @dataclass
 class SessionMessage:
     """Wrapper for messages in transport sessions."""
+
     message: JSONRPCMessage
 
 

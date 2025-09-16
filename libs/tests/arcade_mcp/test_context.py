@@ -1,18 +1,15 @@
 """Tests for MCP Context implementation."""
 
 import asyncio
-import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, Mock, patch
-from contextvars import copy_context
+from unittest.mock import AsyncMock, Mock
 
-from arcade_mcp.context import Context, get_current_model_context as get_current_context, set_current_model_context as set_current_context
+import pytest
+from arcade_mcp.context import Context
+from arcade_mcp.context import get_current_model_context as get_current_context
+from arcade_mcp.context import set_current_model_context as set_current_context
 from arcade_mcp.types import (
-    LoggingLevel,
-    ModelPreferences,
     ModelHint,
-    CreateMessageResult,
-    ClientCapabilities,
+    ModelPreferences,
 )
 
 
@@ -29,10 +26,7 @@ class TestContext:
         assert context.session_id is None
 
         # Context with request ID
-        context2 = Context(
-            server=mcp_server,
-            request_id="req-123"
-        )
+        context2 = Context(server=mcp_server, request_id="req-123")
 
         assert context2.request_id == "req-123"
         assert context2.session_id is None  # No session set yet
@@ -40,14 +34,14 @@ class TestContext:
     def test_context_implements_protocol(self):
         """Test that Context implements MCPContext protocol."""
         # Context should expose namespaced adapters
-        assert hasattr(Context, 'log')
-        assert hasattr(Context, 'progress')
-        assert hasattr(Context, 'resources')
-        assert hasattr(Context, 'tools')
-        assert hasattr(Context, 'prompts')
-        assert hasattr(Context, 'sampling')
-        assert hasattr(Context, 'ui')
-        assert hasattr(Context, 'notifications')
+        assert hasattr(Context, "log")
+        assert hasattr(Context, "progress")
+        assert hasattr(Context, "resources")
+        assert hasattr(Context, "tools")
+        assert hasattr(Context, "prompts")
+        assert hasattr(Context, "sampling")
+        assert hasattr(Context, "ui")
+        assert hasattr(Context, "notifications")
 
     def test_context_var_management(self):
         """Test context variable get/set functionality."""
@@ -145,10 +139,7 @@ class TestContext:
         await context.progress.report(50, 100, "Processing...")
 
         session.send_progress_notification.assert_called_once_with(
-            progress_token="task-123",
-            progress=50,
-            total=100,
-            message="Processing..."
+            progress_token="task-123", progress=50, total=100, message="Processing..."
         )
 
         # Without total
@@ -157,7 +148,7 @@ class TestContext:
         assert session.send_progress_notification.call_count == 2
 
         # Test without progress token - should not call send_progress_notification
-        session2 = Mock(spec=['send_progress_notification'])
+        session2 = Mock(spec=["send_progress_notification"])
         session2.send_progress_notification = AsyncMock()
         # Without _request_meta attribute, progress won't be reported
         context2 = Context(server=mcp_server)
@@ -170,9 +161,9 @@ class TestContext:
     async def test_resource_reading(self, mcp_server):
         """Test resource reading through context."""
         # Mock server's resource reading
-        mcp_server._mcp_read_resource = AsyncMock(return_value=[
-            {"uri": "file://test.txt", "text": "Test content"}
-        ])
+        mcp_server._mcp_read_resource = AsyncMock(
+            return_value=[{"uri": "file://test.txt", "text": "Test content"}]
+        )
 
         context = Context(server=mcp_server)
 
@@ -216,10 +207,7 @@ class TestContext:
 
         # Test basic sampling
         result = await context.sampling.create_message(
-            messages="Hello",
-            system_prompt="Be helpful",
-            temperature=0.7,
-            max_tokens=100
+            messages="Hello", system_prompt="Be helpful", temperature=0.7, max_tokens=100
         )
 
         assert result["type"] == "text"
@@ -228,9 +216,7 @@ class TestContext:
         # Test with model preferences
         result = await context.sampling.create_message(
             messages=[{"role": "user", "content": "Hello"}],
-            model_preferences=ModelPreferences(
-                hints=[ModelHint(name="claude-3")]
-            )
+            model_preferences=ModelPreferences(hints=[ModelHint(name="claude-3")]),
         )
 
         assert session.create_message.call_count == 2
@@ -265,8 +251,7 @@ class TestContext:
 
         assert result == {"value": "user input"}
         session.elicit.assert_called_once_with(
-            message="Enter your name:",
-            requested_schema={"type": "object", "properties": {}}
+            message="Enter your name:", requested_schema={"type": "object", "properties": {}}, timeout=300.0
         )
 
         # Test with schema
@@ -275,10 +260,7 @@ class TestContext:
 
         assert result == {"value": "user input"}
         assert session.elicit.call_count == 2
-        session.elicit.assert_called_with(
-            message="Enter details:",
-            requested_schema=schema
-        )
+        session.elicit.assert_called_with(message="Enter details:", requested_schema=schema, timeout=300)
 
     @pytest.mark.asyncio
     async def test_notification_queueing(self, mcp_server):
@@ -320,8 +302,6 @@ class TestContext:
         nm.notify_tool_list_changed.assert_called_once_with(["test-session-123"])
         nm.notify_resource_list_changed.assert_called_once_with(["test-session-123"])
 
-
-
     def test_parse_model_preferences(self, mcp_server):
         """Test model preferences parsing."""
         context = Context(server=mcp_server)
@@ -356,7 +336,6 @@ class TestContext:
     async def test_context_without_server(self):
         """Test operations that require server when server is None."""
         # Create a context with a server that will be garbage collected
-        import weakref
         server = Mock()
         context = Context(server=server)
         # Clear the strong reference to server
@@ -398,4 +377,3 @@ class TestContext:
 
         # After exit, context should be reset
         assert get_current_context() is None
-

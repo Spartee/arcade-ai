@@ -10,32 +10,32 @@ import logging
 from typing import Any, Callable
 
 from arcade_mcp.exceptions import NotFoundError
-from arcade_mcp.managers.base import ComponentManager
-from arcade_mcp.types import Resource, ResourceTemplate, ResourceContents
+from arcade_mcp.managers.base import Registry
+from arcade_mcp.types import (
+    BlobResourceContents,
+    Resource,
+    ResourceContents,
+    ResourceTemplate,
+    TextResourceContents,
+)
 
 logger = logging.getLogger("arcade.mcp.managers.resource")
 
 
-class ResourceManager(ComponentManager[Resource]):
+class ResourceManager(Registry[Resource]):
     """
     Manages resources for the MCP server.
-
-    Passive manager: no per-manager locks or start/stop lifecycle.
     """
 
     def __init__(
         self,
-        on_update=None,
-    ):
+    ) -> None:
         """
         Initialize resource manager.
-
-        Args:
-            on_update: Optional callback invoked when an existing resource/template is updated.
         """
-        super().__init__("resource", on_update)
+        super().__init__("resource")
+        # Additional storage for templates and handlers
         self._templates: dict[str, ResourceTemplate] = {}
-        self._resources: dict[str, Resource] = {}
         self._resource_handlers: dict[str, Callable[[str], Any]] = {}
 
     async def list_resources(self) -> list[Resource]:
@@ -45,7 +45,7 @@ class ResourceManager(ComponentManager[Resource]):
         Returns:
             List of resources
         """
-        return list(self._resources.values())
+        return list(self)
 
     async def list_resource_templates(self) -> list[ResourceTemplate]:
         """
@@ -74,50 +74,42 @@ class ResourceManager(ComponentManager[Resource]):
             handler = self._resource_handlers[uri]
             result = handler(uri)
             if hasattr(result, "__await__"):
-                result = await result  # type: ignore[assignment]
+                result = await result
 
             if isinstance(result, str):
-                return [ResourceContents(uri=uri, text=result)]
+                return [TextResourceContents(uri=uri, text=result)]
             elif isinstance(result, dict):
-                return [ResourceContents(uri=uri, **result)]
+                # Accept either text or blob payloads
+                if "text" in result:
+                    return [TextResourceContents(uri=uri, text=result["text"])]
+                if "blob" in result:
+                    return [BlobResourceContents(uri=uri, blob=result["blob"])]
+                return [ResourceContents(uri=uri)]
             elif isinstance(result, list):
                 return result
             else:
-                return [ResourceContents(uri=uri, text=str(result))]
+                return [TextResourceContents(uri=uri, text=str(result))]
 
         # Static resource must exist
-        if uri not in self._resources:
+        if uri not in self:
             raise NotFoundError(f"Resource '{uri}' not found")
 
         # Default static content placeholder
-        return [ResourceContents(uri=uri, text="")]
+        return [TextResourceContents(uri=uri, text="")]
 
-    async def add_resource(self, resource: Resource, handler: Callable[[str], Any] | None = None) -> None:
+    async def add_resource(
+        self, resource: Resource, handler: Callable[[str], Any] | None = None
+    ) -> None:
         """
         Add a resource to the manager.
-
-        If a resource with the same URI exists, equality is checked. If equal, the
-        call is a no-op. If different, the resource is replaced and on_update is
-        invoked.
-
         Args:
-        	resource: Resource to add
-        	handler: Optional handler function to generate resource content
+                resource: Resource to add
+                handler: Optional handler function to generate resource content
         """
         uri = resource.uri
-
-        if uri in self._resources:
-            existing = self._resources[uri]
-            if existing == resource:
-                return
-            self._resources[uri] = resource
-            if handler:
-                self._resource_handlers[uri] = handler
-            self._on_update(uri, existing, resource)
-        else:
-            self._resources[uri] = resource
-            if handler:
-                self._resource_handlers[uri] = handler
+        self.add(uri, resource)
+        if handler:
+            self._resource_handlers[uri] = handler
 
     async def remove_resource(self, uri: str) -> Resource:
         """
@@ -132,13 +124,13 @@ class ResourceManager(ComponentManager[Resource]):
         Raises:
             NotFoundError: If resource not found
         """
-        if uri not in self._resources:
-            raise NotFoundError(f"Resource '{uri}' not found")
-        resource = self._resources.pop(uri)
+        resource = self.remove(uri)
         self._resource_handlers.pop(uri, None)
         return resource
 
-    async def update_resource(self, uri: str, resource: Resource, handler: Callable[[str], Any] | None = None) -> Resource:
+    async def update_resource(
+        self, uri: str, resource: Resource, handler: Callable[[str], Any] | None = None
+    ) -> Resource:
         """
         Update an existing resource.
 
@@ -153,36 +145,27 @@ class ResourceManager(ComponentManager[Resource]):
         Raises:
             NotFoundError: If resource not found
         """
-        if uri not in self._resources:
-            raise NotFoundError(f"Resource '{uri}' not found")
-
-        old_resource = self._resources.pop(uri)
+        # Remove old resource
+        self.remove(uri)
         self._resource_handlers.pop(uri, None)
 
-        self._resources[resource.uri] = resource
+        # Add new resource
+        self.add(resource.uri, resource)
         if handler:
             self._resource_handlers[resource.uri] = handler
 
-        self._on_update(resource.uri, old_resource, resource)
         return resource
 
     async def add_template(self, template: ResourceTemplate) -> None:
         """
         Add a resource template.
 
-        If a template with the same uriTemplate exists and differs, it is replaced
-        and on_update is invoked.
-
         Args:
             template: Template to add
         """
         uri_template = template.uriTemplate
         if uri_template in self._templates:
-            existing = self._templates[uri_template]
-            if existing == template:
-                return
             self._templates[uri_template] = template
-            self._on_update(uri_template, existing, template)
         else:
             self._templates[uri_template] = template
 
@@ -201,4 +184,5 @@ class ResourceManager(ComponentManager[Resource]):
         """
         if uri_template not in self._templates:
             raise NotFoundError(f"Resource template '{uri_template}' not found")
-        return self._templates.pop(uri_template)
+        removed = self._templates.pop(uri_template)
+        return removed

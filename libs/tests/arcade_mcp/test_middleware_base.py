@@ -1,14 +1,14 @@
 """Tests for Middleware base classes."""
 
-import pytest
-import pytest_asyncio
 from unittest.mock import Mock
-from typing import Any
 
+import pytest
 from arcade_mcp.middleware.base import (
     Middleware,
     MiddlewareContext,
 )
+
+
 class TestMiddlewareBase:
     """Test base middleware functionality."""
 
@@ -34,10 +34,7 @@ class TestMiddlewareBase:
 
     def test_middleware_context_metadata(self):
         """Test metadata management in context."""
-        context = MiddlewareContext(
-            message={},
-            mcp_context=Mock()
-        )
+        context = MiddlewareContext(message={}, mcp_context=Mock())
 
         # Initial metadata is empty
         assert context.metadata == {}
@@ -79,6 +76,7 @@ class TestMiddlewareBase:
     @pytest.mark.asyncio
     async def test_middleware_modification(self):
         """Test middleware that modifies context."""
+
         class ModifyingMiddleware(Middleware):
             async def __call__(self, context, call_next):
                 # Modify context before
@@ -145,6 +143,7 @@ class TestMiddlewareBase:
     @pytest.mark.asyncio
     async def test_middleware_error_propagation(self):
         """Test error propagation through middleware."""
+
         class ErrorMiddleware(Middleware):
             async def __call__(self, context, call_next):
                 try:
@@ -168,6 +167,7 @@ class TestMiddlewareBase:
     @pytest.mark.asyncio
     async def test_middleware_short_circuit(self):
         """Test middleware that short-circuits the chain."""
+
         class ShortCircuitMiddleware(Middleware):
             async def __call__(self, context, call_next):
                 # Don't call next for certain conditions
@@ -194,7 +194,7 @@ class TestMiddlewareBase:
     def test_middleware_protocol(self):
         """Test that Middleware follows the protocol."""
         # Middleware should be a protocol/ABC
-        assert hasattr(Middleware, "__call__")
+        assert callable(Middleware)
 
         # Should not be instantiable directly
         # (This is more of a documentation test since Python protocols are flexible)

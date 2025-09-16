@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 
 from arcade_core.catalog import MaterializedTool
+from arcade_core.schema import ToolDefinition
 
 # Type aliases for MCP types
 MCPTool = dict[str, Any]
@@ -16,7 +17,7 @@ MCPContent = MCPTextContent | MCPImageContent | MCPEmbeddedResource
 logger = logging.getLogger("arcade.mcp")
 
 
-def create_mcp_tool(tool: MaterializedTool) -> dict[str, Any] | None:  # noqa: C901
+def create_mcp_tool(tool: MaterializedTool) -> dict[str, Any] | None:
     """
     Create an MCP-compatible tool definition from an Arcade tool.
 
@@ -32,7 +33,7 @@ def create_mcp_tool(tool: MaterializedTool) -> dict[str, Any] | None:  # noqa: C
         fully_qualified_name = getattr(tool.definition, "fully_qualified_name", None)
 
         # Use fully qualified name for MCP tool name (replacing dots with underscores)
-        name = str(fully_qualified_name).replace(".", "_") if fully_qualified_name else tool_name
+        name = fully_qualified_name.replace(".", "_") if fully_qualified_name else tool_name
 
         description = getattr(tool.definition, "description", "No description available")
 
@@ -58,7 +59,11 @@ def create_mcp_tool(tool: MaterializedTool) -> dict[str, Any] | None:  # noqa: C
                         continue
 
                     val_schema = getattr(param, "value_schema", None)
-                    json_type = _map_type_to_json_schema_type(val_schema.val_type) if val_schema else "string"
+                    json_type = (
+                        _map_type_to_json_schema_type(val_schema.val_type)
+                        if val_schema
+                        else "string"
+                    )
 
                     prop: dict[str, Any] = {"type": json_type}
                     prop["description"] = param.description or f"Parameter: {param.name}"
@@ -69,7 +74,11 @@ def create_mcp_tool(tool: MaterializedTool) -> dict[str, Any] | None:  # noqa: C
 
                     # Array item typing
                     if val_schema and val_schema.val_type == "array":
-                        inner_type = _map_type_to_json_schema_type(val_schema.inner_val_type) if val_schema.inner_val_type else "string"
+                        inner_type = (
+                            _map_type_to_json_schema_type(val_schema.inner_val_type)
+                            if val_schema.inner_val_type
+                            else "string"
+                        )
                         prop["items"] = {"type": inner_type}
 
                     parameters[param.name] = prop
@@ -103,7 +112,9 @@ def create_mcp_tool(tool: MaterializedTool) -> dict[str, Any] | None:  # noqa: C
                         field_type_name = "object"
 
                     # Get description with fallback
-                    field_description = getattr(field, "description", None) or f"Parameter: {field_name}"
+                    field_description = (
+                        getattr(field, "description", None) or f"Parameter: {field_name}"
+                    )
 
                     # Create parameter definition
                     param_def: dict[str, Any] = {
@@ -116,7 +127,9 @@ def create_mcp_tool(tool: MaterializedTool) -> dict[str, Any] | None:  # noqa: C
                     if hasattr(field, "annotation"):
                         ann = field.annotation
                         # Handle typing.Annotated[Enum, ...]
-                        if getattr(ann, "__origin__", None) is not None and hasattr(ann, "__args__"):
+                        if getattr(ann, "__origin__", None) is not None and hasattr(
+                            ann, "__args__"
+                        ):
                             for arg in ann.__args__:  # type: ignore[union-attr]
                                 if isinstance(arg, type) and issubclass(arg, Enum):
                                     enum_type = arg
@@ -214,26 +227,15 @@ def create_mcp_tool(tool: MaterializedTool) -> dict[str, Any] | None:  # noqa: C
         if annotations:
             tool_def["annotations"] = annotations
 
-        # Add toolkit information to description if available
-        if hasattr(tool.definition, "toolkit") and tool.definition.toolkit:
-            toolkit = tool.definition.toolkit
-            toolkit_info = f" (from {toolkit.name}"
-            if toolkit.version:
-                toolkit_info += f" v{toolkit.version}"
-            toolkit_info += ")"
-            tool_def["description"] += toolkit_info
-
-        logger.debug(f"Created tool definition for {name}")
-        return tool_def  # noqa: TRY300
-
     except Exception:
         logger.exception(
             f"Error creating MCP tool definition for {getattr(tool, 'name', str(tool))}"
         )
         return None
+    return tool_def
 
 
-def convert_to_mcp_content(value: Any) -> list[dict[str, Any]]:
+def convert_to_mcp_content(value: Any) -> list[MCPContent]:
     """
     Convert a Python value to MCP-compatible content.
     """
@@ -275,3 +277,57 @@ def _map_type_to_json_schema_type(val_type: str | None) -> str:
         "array": "array",
     }
     return mapping.get(val_type, "string")
+
+
+def build_input_schema_from_definition(definition: ToolDefinition) -> dict[str, Any]:
+    """Build a JSON schema object for tool inputs from a ToolDefinition.
+
+    Returns a dict with keys: type, properties, and optional required.
+    """
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+
+    if getattr(definition, "input", None) and getattr(definition.input, "parameters", None):
+        for param in definition.input.parameters:
+            val_schema = getattr(param, "value_schema", None)
+            schema: dict[str, Any] = {
+                "type": _map_type_to_json_schema_type(getattr(val_schema, "val_type", None)),
+            }
+
+            if getattr(param, "description", None):
+                schema["description"] = param.description
+
+            if val_schema and getattr(val_schema, "enum", None):
+                schema["enum"] = list(val_schema.enum)
+
+            if (
+                val_schema
+                and val_schema.val_type == "array"
+                and getattr(val_schema, "inner_val_type", None)
+            ):
+                schema["items"] = {"type": _map_type_to_json_schema_type(val_schema.inner_val_type)}
+
+            if (
+                val_schema
+                and val_schema.val_type == "json"
+                and getattr(val_schema, "properties", None)
+            ):
+                schema["type"] = "object"
+                schema["properties"] = {}
+                for prop_name, prop_schema in val_schema.properties.items():
+                    schema["properties"][prop_name] = {
+                        "type": _map_type_to_json_schema_type(
+                            getattr(prop_schema, "val_type", None)
+                        ),
+                    }
+                    if getattr(prop_schema, "description", None):
+                        schema["properties"][prop_name]["description"] = prop_schema.description
+
+            properties[param.name] = schema
+            if getattr(param, "required", False):
+                required.append(param.name)
+
+    input_schema: dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        input_schema["required"] = required
+    return input_schema

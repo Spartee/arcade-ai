@@ -17,18 +17,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import uuid
 from typing import Any, Callable
 
 from arcade_core.catalog import MaterializedTool, ToolCatalog
-from arcade_core.config import config
 from arcade_core.executor import ToolExecutor
+from arcade_core.schema import ToolAuthRequirement as CoreToolAuthRequirement
 from arcade_core.schema import ToolContext
 from arcade_tdk.context import Context as TDKContext
 from arcadepy import ArcadeError, AsyncArcade
 from arcadepy.types.auth_authorize_params import AuthRequirement, AuthRequirementOauth2
 
-from arcade_mcp.base import MCPComponent
 from arcade_mcp.context import Context, get_current_model_context, set_current_model_context
 from arcade_mcp.convert import convert_to_mcp_content
 from arcade_mcp.exceptions import NotFoundError, ToolError
@@ -45,6 +43,7 @@ from arcade_mcp.session import InitializationState, ServerSession
 from arcade_mcp.settings import MCPSettings
 from arcade_mcp.types import (
     LATEST_PROTOCOL_VERSION,
+    BlobResourceContents,
     CallToolRequest,
     CallToolResult,
     CompleteRequest,
@@ -66,19 +65,21 @@ from arcade_mcp.types import (
     ListRootsRequest,
     ListToolsRequest,
     ListToolsResult,
+    MCPMessage,
     PingRequest,
     ReadResourceRequest,
     ReadResourceResult,
     ServerCapabilities,
     SetLevelRequest,
     SubscribeRequest,
+    TextResourceContents,
     UnsubscribeRequest,
 )
 
 logger = logging.getLogger("arcade.mcp")
 
 
-class MCPServer(MCPComponent):
+class MCPServer:
     """
     MCP Server with middleware and context support.
 
@@ -120,7 +121,9 @@ class MCPServer(MCPComponent):
             arcade_api_key: Arcade API key (overrides settings)
             arcade_api_url: Arcade API URL (overrides settings)
         """
-        super().__init__(name)
+        self.name = name or self.__class__.__name__
+        self._started = False
+        self._lock = asyncio.Lock()
 
         # Server identity
         self.version = version
@@ -153,10 +156,6 @@ class MCPServer(MCPComponent):
         self._sessions: dict[str, ServerSession] = {}
         self._sessions_lock = asyncio.Lock()
 
-        # Server lifecycle lock
-        self._lifecycle_lock = asyncio.Lock()
-        self._started: bool = False
-
         # Handler registration
         self._handlers = self._register_handlers()
 
@@ -164,16 +163,14 @@ class MCPServer(MCPComponent):
         """Initialize Arcade client for runtime authorization."""
         self.arcade: AsyncArcade | None = None
 
-        if not api_key:
-            api_key = os.environ.get("ARCADE_API_KEY")
         if not api_url:
             api_url = os.environ.get("ARCADE_API_URL", "https://api.arcade.dev")
 
         if api_key:
-            self.logger.info(f"Using Arcade client with API URL: {api_url}")
+            logger.info(f"Using Arcade client with API URL: {api_url}")
             self.arcade = AsyncArcade(api_key=api_key, base_url=api_url)
         else:
-            self.logger.warning(
+            logger.warning(
                 "Arcade API key not configured. Tools requiring auth will return a login instruction."
             )
 
@@ -215,31 +212,50 @@ class MCPServer(MCPComponent):
         )
 
     async def _start(self) -> None:
-        """Start server components (idempotent, guarded by server lock)."""
-        async with self._lifecycle_lock:
-            if self._started:
-                return
-            await self.lifespan_manager.startup()
-            self._started = True
+        """Start server components (called by MCPComponent.start)."""
+        await self.lifespan_manager.startup()
 
     async def _stop(self) -> None:
-        """Stop server components (idempotent, guarded by server lock)."""
-        async with self._lifecycle_lock:
-            if not self._started:
+        """Stop server components (called by MCPComponent.stop)."""
+        # Stop all sessions
+        async with self._sessions_lock:
+            sessions = list(self._sessions.values())
+        for _session in sessions:
+            # Sessions should handle their own cleanup
+            pass
+
+        # Managers are passive; no per-manager stop needed
+
+        # Stop lifespan
+        await self.lifespan_manager.shutdown()
+
+    async def start(self) -> None:
+        async with self._lock:
+            if self._started:
+                logger.debug(f"{self.name} already started")
                 return
+            logger.info(f"Starting {self.name}")
+            try:
+                await self._start()
+                self._started = True
+                logger.info(f"{self.name} started successfully")
+            except Exception:
+                logger.exception(f"Failed to start {self.name}")
+                raise
 
-            # Stop all sessions
-            async with self._sessions_lock:
-                sessions = list(self._sessions.values())
-            for session in sessions:
-                # Sessions should handle their own cleanup
-                pass
-
-            # Managers are passive; no per-manager stop needed
-
-            # Stop lifespan
-            await self.lifespan_manager.shutdown()
-            self._started = False
+    async def stop(self) -> None:
+        async with self._lock:
+            if not self._started:
+                logger.debug(f"{self.name} not started")
+                return
+            logger.info(f"Stopping {self.name}")
+            try:
+                await self._stop()
+                self._started = False
+                logger.info(f"{self.name} stopped successfully")
+            except Exception:
+                logger.exception(f"Failed to stop {self.name}")
+                # best-effort on stop
 
     async def run_connection(
         self,
@@ -269,33 +285,22 @@ class MCPServer(MCPComponent):
             self._sessions[session.session_id] = session
 
         try:
-            self.logger.info(f"Starting session {session.session_id}")
+            logger.info(f"Starting session {session.session_id}")
             await session.run()
-        except Exception as e:
-            self.logger.error(f"Session error: {e}")
+        except Exception:
+            logger.exception("Session error")
             raise
         finally:
             # Unregister session
             async with self._sessions_lock:
                 self._sessions.pop(session.session_id, None)
-            self.logger.info(f"Session {session.session_id} ended")
-
-    def _extract_local_user_id(self) -> str:
-        """Extract user ID from various sources."""
-
-        if self.settings.arcade.development:
-            if self.settings.arcade.dev_user_id:
-                return self.settings.arcade.dev_user_id
-            elif config.user and config.user.email:
-                return config.user.email
-            else:
-                return str(uuid.uuid4())
+            logger.info(f"Session {session.session_id} ended")
 
     async def handle_message(
         self,
         message: Any,
         session: ServerSession | None = None,
-    ) -> Any:
+    ) -> MCPMessage | None:
         """
         Handle an incoming message.
 
@@ -315,6 +320,8 @@ class MCPServer(MCPComponent):
 
         method = message.get("method")
         msg_id = message.get("id")
+        if not isinstance(method, str):
+            method = None
 
         # Handle notifications (no response needed)
         if method and method.startswith("notifications/"):
@@ -328,15 +335,18 @@ class MCPServer(MCPComponent):
             return None
 
         # Check initialization state
-        if session and session.initialization_state != InitializationState.INITIALIZED:
-            if method not in ["initialize", "ping"]:
-                return JSONRPCError(
-                    id=str(msg_id or "null"),
-                    error={
-                        "code": -32600,
-                        "message": "Request not allowed before initialization",
-                    },
-                )
+        if (
+            session
+            and session.initialization_state != InitializationState.INITIALIZED
+            and method not in ["initialize", "ping"]
+        ):
+            return JSONRPCError(
+                id=str(msg_id or "null"),
+                error={
+                    "code": -32600,
+                    "message": "Request not allowed before initialization",
+                },
+            )
 
         # Find handler
         handler = self._handlers.get(method)
@@ -371,14 +381,17 @@ class MCPServer(MCPComponent):
                 )
 
                 # Parse message based on method
-                parsed_message = self._parse_message(message, method)
+                parsed_message = self._parse_message(message, method or "")
 
                 # Apply middleware chain
-                result = await self._apply_middleware(
-                    middleware_context, lambda ctx: handler(parsed_message, session=session)
-                )
+                async def final_handler(_: MiddlewareContext[Any]) -> Any:
+                    return await handler(parsed_message, session=session)
 
-                return result
+                result = await self._apply_middleware(middleware_context, final_handler)
+
+                from typing import cast
+
+                return cast(MCPMessage | None, result)
 
             finally:
                 # Clean up context
@@ -386,8 +399,8 @@ class MCPServer(MCPComponent):
                 if session:
                     await session.cleanup_request_context(context)
 
-        except Exception as e:
-            self.logger.exception(f"Error handling message: {e}")
+        except Exception:
+            logger.exception("Error handling message")
             return JSONRPCError(
                 id=str(msg_id or "null"),
                 error={"code": -32603, "message": "Internal error"},
@@ -415,18 +428,23 @@ class MCPServer(MCPComponent):
         }
 
         message_type = message_types.get(method)
-        if message_type:
-            return message_type.model_validate(message)
+        if message_type is not None:
+            # Use constructor for compatibility across Pydantic versions
+            return message_type(**message)
         return message
 
     async def _apply_middleware(
         self,
         context: MiddlewareContext[Any],
-        final_handler: Callable[[MiddlewareContext[Any]], Any],
+        final_handler: Callable[[MiddlewareContext[Any]], Any] | CallNext[Any, Any],
     ) -> Any:
         """Apply middleware chain to a request."""
+
         # Build chain from outside in
-        chain: CallNext[Any, Any] = final_handler
+        async def chain_fn(ctx: MiddlewareContext[Any]) -> Any:
+            return await final_handler(ctx)
+
+        chain: CallNext[Any, Any] = chain_fn
 
         for middleware in reversed(self.middleware):
 
@@ -437,7 +455,7 @@ class MCPServer(MCPComponent):
             ) -> Any:
                 return await mw(ctx, next_handler)
 
-            chain = make_handler
+            chain = make_handler  # type: ignore[assignment]
 
         # Execute chain
         return await chain(context)
@@ -482,13 +500,13 @@ class MCPServer(MCPComponent):
         self,
         message: ListToolsRequest,
         session: ServerSession | None = None,
-    ) -> JSONRPCResponse[ListToolsResult]:
+    ) -> JSONRPCResponse[ListToolsResult] | JSONRPCError:
         """Handle list tools request."""
         try:
             tools = await self._tool_manager.list_tools()
             return JSONRPCResponse(id=message.id, result=ListToolsResult(tools=tools))
         except Exception:
-            self.logger.exception("Error listing tools")
+            logger.exception("Error listing tools")
             return JSONRPCError(
                 id=message.id,
                 error={"code": -32603, "message": "Internal error listing tools"},
@@ -505,22 +523,24 @@ class MCPServer(MCPComponent):
         tool_context = TDKContext()
 
         # secrets
-        if tool.definition.requirements:
-            # Handle secrets
-            if tool.definition.requirements.secrets:
-                for secret in tool.definition.requirements.secrets:
-                    if secret.key in self.settings.tool_secrets():
-                        tool_context.set_secret(
-                            secret.key, self.settings.tool_secrets()[secret.key]
-                        )
-                    elif secret.key in os.environ:
-                        tool_context.set_secret(secret.key, os.environ[secret.key])
+        if tool.definition.requirements and tool.definition.requirements.secrets:
+            for secret in tool.definition.requirements.secrets:
+                if secret.key in self.settings.tool_secrets():
+                    tool_context.set_secret(secret.key, self.settings.tool_secrets()[secret.key])
+                elif secret.key in os.environ:
+                    tool_context.set_secret(secret.key, os.environ[secret.key])
 
-        # user_id is local ARCADE_USER_ID if development
-        if self.settings.arcade.environment == "development":
-            tool_context.user_id = self.settings.arcade.dev_user_id
+        # user_id selection
+        env = (self.settings.arcade.environment or "").lower()
+        if self.settings.arcade.user_id:
+            tool_context.user_id = self.settings.arcade.user_id
+            logger.debug(f"Context user_id set from ARCADE_USER_ID (env={env})")
+        elif env in ("development", "dev", "local"):
+            tool_context.user_id = session.session_id if session else None
+            logger.debug(f"Context user_id set from session (dev env={env})")
         else:
             tool_context.user_id = session.session_id if session else None
+            logger.debug("Context user_id set from session (non-dev env)")
 
         return tool_context
 
@@ -528,7 +548,7 @@ class MCPServer(MCPComponent):
         self,
         message: CallToolRequest,
         session: ServerSession | None = None,
-    ) -> JSONRPCResponse[CallToolResult]:
+    ) -> JSONRPCResponse[CallToolResult] | JSONRPCError:
         """Handle tool call request."""
         tool_name = message.params.name
         input_params = message.params.arguments or {}
@@ -543,7 +563,7 @@ class MCPServer(MCPComponent):
             # Attach tool_context to current model context for this request
             mctx = get_current_model_context()
             if mctx is not None:
-                mctx.set_tool_context(tool_context)  # type: ignore[attr-defined]
+                mctx.set_tool_context(tool_context)
 
             # Handle authorization if required
             if tool.definition.requirements and tool.definition.requirements.authorization:
@@ -590,7 +610,7 @@ class MCPServer(MCPComponent):
                 ),
             )
         except Exception:
-            self.logger.exception("Error calling tool")
+            logger.exception("Error calling tool")
             return JSONRPCError(
                 id=message.id,
                 error={"code": -32603, "message": "Internal error calling tool"},
@@ -609,35 +629,44 @@ class MCPServer(MCPComponent):
             )
 
         req = tool.definition.requirements.authorization
-        auth_req = AuthRequirement(
-            provider_id=str(req.provider_id),
-            provider_type=str(req.provider_type),
+        provider_id = str(getattr(req, "provider_id", ""))
+        provider_type = str(getattr(req, "provider_type", ""))
+        # TypedDict requires concrete type; supply empty scopes if absent when oauth2 provider
+        oauth2_req = (
+            AuthRequirementOauth2(
+                scopes=(req.oauth2.scopes or []) if req.oauth2 is not None else []
+            )
+            if isinstance(req, CoreToolAuthRequirement) and provider_type.lower() == "oauth2"
+            else None
         )
-        if hasattr(req, "oauth2") and req.oauth2:
-            auth_req.oauth2 = AuthRequirementOauth2(scopes=req.oauth2.scopes or [])
+        auth_req = AuthRequirement(
+            provider_id=provider_id,
+            provider_type=provider_type,
+            oauth2=oauth2_req,
+        )
 
         try:
             response = await self.arcade.auth.authorize(
                 auth_requirement=auth_req,
                 user_id=user_id or "anonymous",
             )
-            return response
         except ArcadeError as e:
-            self.logger.exception("Error authorizing tool")
+            logger.exception("Error authorizing tool")
             raise ToolError(f"Authorization failed: {e}") from e
+        else:
+            return response
 
     async def _handle_list_resources(
         self,
         message: ListResourcesRequest,
-        user_id: str | None = None,
         session: ServerSession | None = None,
-    ) -> JSONRPCResponse[ListResourcesResult]:
+    ) -> JSONRPCResponse[ListResourcesResult] | JSONRPCError:
         """Handle list resources request."""
         try:
             resources = await self._resource_manager.list_resources()
             return JSONRPCResponse(id=message.id, result=ListResourcesResult(resources=resources))
         except Exception:
-            self.logger.exception("Error listing resources")
+            logger.exception("Error listing resources")
             return JSONRPCError(
                 id=message.id,
                 error={"code": -32603, "message": "Internal error listing resources"},
@@ -646,9 +675,8 @@ class MCPServer(MCPComponent):
     async def _handle_list_resource_templates(
         self,
         message: ListResourceTemplatesRequest,
-        user_id: str | None = None,
         session: ServerSession | None = None,
-    ) -> JSONRPCResponse[ListResourceTemplatesResult]:
+    ) -> JSONRPCResponse[ListResourceTemplatesResult] | JSONRPCError:
         """Handle list resource templates request."""
         try:
             templates = await self._resource_manager.list_resource_templates()
@@ -657,7 +685,7 @@ class MCPServer(MCPComponent):
                 result=ListResourceTemplatesResult(resourceTemplates=templates),
             )
         except Exception:
-            self.logger.exception("Error listing resource templates")
+            logger.exception("Error listing resource templates")
             return JSONRPCError(
                 id=message.id,
                 error={"code": -32603, "message": "Internal error listing resource templates"},
@@ -666,20 +694,26 @@ class MCPServer(MCPComponent):
     async def _handle_read_resource(
         self,
         message: ReadResourceRequest,
-        user_id: str | None = None,
         session: ServerSession | None = None,
-    ) -> JSONRPCResponse[ReadResourceResult]:
+    ) -> JSONRPCResponse[ReadResourceResult] | JSONRPCError:
         """Handle read resource request."""
         try:
             contents = await self._resource_manager.read_resource(message.params.uri)
-            return JSONRPCResponse(id=message.id, result=ReadResourceResult(contents=contents))
+            # Narrow to allowed types for ReadResourceResult
+            allowed_contents = [
+                c for c in contents if isinstance(c, (TextResourceContents, BlobResourceContents))
+            ]
+            return JSONRPCResponse(
+                id=message.id,
+                result=ReadResourceResult(contents=allowed_contents),
+            )
         except NotFoundError:
             return JSONRPCError(
                 id=message.id,
                 error={"code": -32002, "message": f"Resource not found: {message.params.uri}"},
             )
         except Exception:
-            self.logger.exception(f"Error reading resource: {message.params.uri}")
+            logger.exception(f"Error reading resource: {message.params.uri}")
             return JSONRPCError(
                 id=message.id,
                 error={"code": -32603, "message": "Internal error reading resource"},
@@ -688,15 +722,14 @@ class MCPServer(MCPComponent):
     async def _handle_list_prompts(
         self,
         message: ListPromptsRequest,
-        user_id: str | None = None,
         session: ServerSession | None = None,
-    ) -> JSONRPCResponse[ListPromptsResult]:
+    ) -> JSONRPCResponse[ListPromptsResult] | JSONRPCError:
         """Handle list prompts request."""
         try:
             prompts = await self._prompt_manager.list_prompts()
             return JSONRPCResponse(id=message.id, result=ListPromptsResult(prompts=prompts))
         except Exception:
-            self.logger.exception("Error listing prompts")
+            logger.exception("Error listing prompts")
             return JSONRPCError(
                 id=message.id,
                 error={"code": -32603, "message": "Internal error listing prompts"},
@@ -705,9 +738,8 @@ class MCPServer(MCPComponent):
     async def _handle_get_prompt(
         self,
         message: GetPromptRequest,
-        user_id: str | None = None,
         session: ServerSession | None = None,
-    ) -> JSONRPCResponse[GetPromptResult]:
+    ) -> JSONRPCResponse[GetPromptResult] | JSONRPCError:
         """Handle get prompt request."""
         try:
             result = await self._prompt_manager.get_prompt(
@@ -721,7 +753,7 @@ class MCPServer(MCPComponent):
                 error={"code": -32002, "message": f"Prompt not found: {message.params.name}"},
             )
         except Exception:
-            self.logger.exception(f"Error getting prompt: {message.params.name}")
+            logger.exception(f"Error getting prompt: {message.params.name}")
             return JSONRPCError(
                 id=message.id,
                 error={"code": -32603, "message": "Internal error getting prompt"},
@@ -730,9 +762,8 @@ class MCPServer(MCPComponent):
     async def _handle_set_log_level(
         self,
         message: SetLevelRequest,
-        user_id: str | None = None,
         session: ServerSession | None = None,
-    ) -> JSONRPCResponse[Any]:
+    ) -> JSONRPCResponse[Any] | JSONRPCError:
         """Handle set log level request."""
         try:
             level_name = str(
@@ -740,9 +771,9 @@ class MCPServer(MCPComponent):
                 if hasattr(message.params.level, "value")
                 else message.params.level
             )
-            self.logger.setLevel(getattr(logging, level_name.upper(), logging.INFO))
+            logger.setLevel(getattr(logging, level_name.upper(), logging.INFO))
         except Exception:
-            self.logger.setLevel(logging.INFO)
+            logger.setLevel(logging.INFO)
 
         return JSONRPCResponse(id=message.id, result={})
 

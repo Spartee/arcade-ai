@@ -12,6 +12,7 @@ from arcade_tdk.context import Context
 from arcade_tdk.tool import tool
 
 __all__ = [
+    "Context",
     "ToolAuthorizationContext",
     "ToolCatalog",
     "ToolContext",
@@ -19,6 +20,5 @@ __all__ = [
     "ToolMetadataKey",
     "ToolSecretItem",
     "Toolkit",
-    "Context",
     "tool",
 ]

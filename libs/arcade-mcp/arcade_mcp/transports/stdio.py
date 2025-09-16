@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from arcade_mcp.exceptions import TransportError
-from arcade_mcp.transports.base import Transport, TransportSession
+from arcade_mcp.session import ServerSession
 
 logger = logging.getLogger("arcade.mcp.transports.stdio")
 
@@ -45,24 +45,27 @@ class StdioReadStream:
         """Stop the read stream."""
         self._running = False
 
-    async def __aiter__(self) -> AsyncIterator[str]:
-        """Async iteration over incoming messages."""
-        while self._running:
-            try:
-                line = await asyncio.to_thread(self.read_queue.get)
-                if line is None:
-                    break
-                yield line
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.exception("Error reading from stdin")
-                raise TransportError(f"Read error: {e}") from e
+    def __aiter__(self) -> AsyncIterator[str]:
+        return self
+
+    async def __anext__(self) -> str:
+        if not self._running:
+            raise StopAsyncIteration
+        try:
+            line = await asyncio.to_thread(self.read_queue.get)
+        except asyncio.CancelledError:
+            raise StopAsyncIteration
+        except Exception as e:
+            logger.exception("Error reading from stdin")
+            raise TransportError(f"Read error: {e}") from e
+        if line is None or not self._running:
+            raise StopAsyncIteration
+        return line
 
 
-class StdioTransport(Transport):
+class StdioTransport:
     """
-    Transport implementation for stdio communication.
+    Stdio transport implementation for stdio communication.
 
     This transport uses stdin/stdout for MCP communication,
     suitable for command-line tools and scripts.
@@ -70,17 +73,18 @@ class StdioTransport(Transport):
 
     def __init__(self, name: str = "stdio"):
         """Initialize stdio transport."""
-        super().__init__(name)
+        self.name = name
         self.read_queue: queue.Queue[str | None] = queue.Queue()
         self.write_queue: queue.Queue[str | None] = queue.Queue()
         self.reader_thread: threading.Thread | None = None
         self.writer_thread: threading.Thread | None = None
         self._shutdown_event = asyncio.Event()
         self._running = False
+        self._sessions: dict[str, ServerSession] = {}
 
     async def start(self) -> None:
         """Start the transport."""
-        await super().start()
+        # Component start is handled here directly
 
         # Start I/O threads
         self._running = True
@@ -101,10 +105,7 @@ class StdioTransport(Transport):
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                loop.add_signal_handler(
-                    sig,
-                    lambda: asyncio.create_task(self.stop())
-                )
+                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
             except NotImplementedError:
                 # Windows doesn't support POSIX signals
                 if sys.platform == "win32":
@@ -133,8 +134,6 @@ class StdioTransport(Transport):
         # Set shutdown event
         self._shutdown_event.set()
 
-        await super().stop()
-
     def _reader_loop(self) -> None:
         """Reader thread loop."""
         try:
@@ -160,11 +159,7 @@ class StdioTransport(Transport):
             logger.exception("Error in writer thread")
 
     @contextlib.asynccontextmanager
-    async def connect_session(
-        self,
-        user_id: str | None = None,
-        **options: Any
-    ) -> AsyncIterator[TransportSession]:
+    async def connect_session(self, **options: Any) -> AsyncIterator[ServerSession]:
         """
         Create a stdio session.
 
@@ -180,13 +175,13 @@ class StdioTransport(Transport):
         session_id = str(uuid.uuid4())
         read_stream = StdioReadStream(self.read_queue)
         write_stream = StdioWriteStream(self.write_queue)
-
-        session = TransportSession(
+        session = ServerSession(
+            server=None,  # set by the caller using run_connection; not used here
+            session_id=session_id,
             read_stream=read_stream,
             write_stream=write_stream,
-            session_id=session_id,
-            user_id=user_id,
             init_options=options,
+            stateless=True,
         )
 
         # Register session
@@ -203,12 +198,12 @@ class StdioTransport(Transport):
         """Wait for the transport to shut down."""
         await self._shutdown_event.wait()
 
-    async def _start(self) -> None:
-        """Component-specific start logic."""
-        # Already handled in start()
-        pass
+    # Minimal session registry to support connect_session lifecycle
+    async def list_sessions(self) -> list[str]:
+        return list(self._sessions.keys())
 
-    async def _stop(self) -> None:
-        """Component-specific stop logic."""
-        # Already handled in stop()
-        pass
+    async def register_session(self, session: ServerSession) -> None:
+        self._sessions[session.session_id] = session
+
+    async def unregister_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
