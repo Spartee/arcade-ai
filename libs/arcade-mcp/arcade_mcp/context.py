@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import weakref
+from builtins import list as builtins_list
 from contextvars import ContextVar, Token
 from typing import Any, cast
 
@@ -357,9 +358,9 @@ class _Resources(_ContextComponent):
         # Resources have uri and name which map to Root
         return [Root(uri=r.uri, name=r.name) for r in resources]
 
-    async def list_templates(self) -> list[Any]:
+    async def list_templates(self) -> builtins_list[Any]:
         templates = await self._ctx.server._resource_manager.list_resource_templates()
-        return cast(list[Any], templates)
+        return cast(builtins_list[Any], templates)
 
 
 class _Tools(_ContextComponent):

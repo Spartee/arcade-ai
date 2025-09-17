@@ -8,7 +8,6 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator
 from enum import Enum
 from typing import Any
 
@@ -207,7 +206,7 @@ class ServerSession:
         self,
         server: Any,
         session_id: str | None = None,
-        read_stream: AsyncIterator[str] | None = None,
+        read_stream: Any | None = None,
         write_stream: Any | None = None,
         init_options: Any | None = None,
         stateless: bool = False,
@@ -567,7 +566,7 @@ class ServerSession:
         if not self._request_manager:
             raise SessionError("Cannot send requests without request manager")
 
-        params = {
+        params: dict[str, Any] = {
             "message": message,
         }
 

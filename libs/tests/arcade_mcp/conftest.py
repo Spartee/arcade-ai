@@ -84,7 +84,7 @@ def materialized_tool(sample_tool_func, sample_tool_def) -> MaterializedTool:
 
 
 @pytest.fixture
-def tool_catalog(materialized_tool) -> ToolCatalog:
+def tool_catalog(materialized_tool: MaterializedTool) -> ToolCatalog:
     """Create a tool catalog with sample tools."""
     catalog = ToolCatalog()
     catalog._tools[materialized_tool.definition.get_fully_qualified_name()] = materialized_tool

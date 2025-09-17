@@ -5,7 +5,7 @@ Creates a FastAPI application that exposes both Arcade Worker endpoints and
 MCP Server endpoints over HTTP/SSE. MCP is always enabled in this integrated mode.
 """
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -87,7 +87,8 @@ def create_arcade_mcp(
     if secret is None:
         secret = "dev"  # noqa: S105
 
-    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with create_lifespan(catalog, mcp_settings, **kwargs) as components:
             app.state.mcp_server = components["mcp_server"]
             app.state.session_manager = components["session_manager"]

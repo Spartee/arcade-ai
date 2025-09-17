@@ -268,6 +268,9 @@ def _map_type_to_json_schema_type(val_type: str | None) -> str:
     Returns:
         The corresponding JSON schema type as a string.
     """
+    if val_type is None:
+        return "string"
+
     mapping: dict[str, str] = {
         "string": "string",
         "integer": "integer",

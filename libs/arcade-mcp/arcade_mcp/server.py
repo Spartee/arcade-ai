@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from arcade_core.catalog import MaterializedTool, ToolCatalog
 from arcade_core.executor import ToolExecutor
@@ -312,16 +312,18 @@ class MCPServer:
             Response message or None
         """
         # Validate message
-        if not isinstance(message, dict):
+        if (
+            not isinstance(message, dict)
+            or not message.get("method")
+            or not isinstance(message["method"], str)
+        ):
             return JSONRPCError(
                 id="null",
                 error={"code": -32600, "message": "Invalid request"},
             )
 
-        method = message.get("method")
+        method = message["method"]
         msg_id = message.get("id")
-        if not isinstance(method, str):
-            method = None
 
         # Handle notifications (no response needed)
         if method and method.startswith("notifications/"):
@@ -444,7 +446,7 @@ class MCPServer:
         async def chain_fn(ctx: MiddlewareContext[Any]) -> Any:
             return await final_handler(ctx)
 
-        chain: CallNext[Any, Any] = chain_fn
+        chain: CallNext[Any, Any] = cast(CallNext[Any, Any], chain_fn)
 
         for middleware in reversed(self.middleware):
 
@@ -637,7 +639,7 @@ class MCPServer:
                 scopes=(req.oauth2.scopes or []) if req.oauth2 is not None else []
             )
             if isinstance(req, CoreToolAuthRequirement) and provider_type.lower() == "oauth2"
-            else None
+            else AuthRequirementOauth2()
         )
         auth_req = AuthRequirement(
             provider_id=provider_id,

@@ -457,7 +457,7 @@ class HTTPStreamableTransport:
                     dict[str, str]
                 ](0)
 
-                async def sse_writer():
+                async def sse_writer() -> None:
                     try:
                         async with sse_stream_writer, request_stream_reader:
                             async for event_message in request_stream_reader:
@@ -742,7 +742,7 @@ class HTTPStreamableTransport:
         self,
     ) -> AsyncIterator[
         tuple[
-            MemoryObjectReceiveStream[SessionMessage | Exception],
+            MemoryObjectReceiveStream[str | Exception],
             MemoryObjectSendStream[str | SessionMessage],
         ]
     ]:
@@ -801,14 +801,15 @@ class HTTPStreamableTransport:
                         event_id = None
                         if self._event_store:
                             event_id = await self._event_store.store_event(
-                                request_stream_id, message
+                                request_stream_id,
+                                message,  # type: ignore[arg-type]
                             )
                             logger.debug(f"Stored {event_id} from {request_stream_id}")
 
                         if request_stream_id in self._request_streams:
                             try:
                                 await self._request_streams[request_stream_id][0].send(
-                                    EventMessage(message, event_id)
+                                    EventMessage(message, event_id)  # type: ignore[arg-type]
                                 )
                             except (anyio.BrokenResourceError, anyio.ClosedResourceError):
                                 self._request_streams.pop(request_stream_id, None)

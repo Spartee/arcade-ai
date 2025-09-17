@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from arcade_mcp.exceptions import NotFoundError, PromptError
+from arcade_mcp.exceptions import PromptError
 from arcade_mcp.managers.base import Registry
 from arcade_mcp.types import GetPromptResult, Prompt, PromptMessage
 
@@ -181,7 +181,7 @@ class PromptManager(Registry[PromptHandler]):
         """
         # Verify the prompt exists
         self.get(name)
-        
+
         # Create new handler and update
         prompt_handler = PromptHandler(prompt, handler)
         self.add(prompt.name, prompt_handler)

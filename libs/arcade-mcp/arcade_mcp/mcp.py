@@ -7,7 +7,7 @@ Provides a clean, minimal API for building MCP servers with lazy initialization.
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable, Literal, TypeVar
+from typing import Any, Callable, Literal, ParamSpec, TypeVar
 
 from arcade_core.catalog import ToolCatalog
 from arcade_tdk.tool import tool as tool_decorator
@@ -16,7 +16,7 @@ from loguru import logger
 from arcade_mcp.exceptions import ServerError
 from arcade_mcp.worker import run_arcade_mcp
 
-P = TypeVar("P")
+P = ParamSpec("P")
 T = TypeVar("T")
 
 TransportType = Literal["http", "stdio"]

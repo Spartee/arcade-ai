@@ -12,25 +12,20 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from loguru import logger
+
 from arcade_core.catalog import ToolCatalog
 from arcade_core.parse import get_tools_from_file
 from arcade_core.toolkit import Toolkit, ToolkitLoadError
-from loguru import logger
-
 
 DISCOVERY_PATTERNS = ["*.py", "tools/*.py", "arcade_tools/*.py", "tools/**/*.py"]
-FILTER_PATTERNS = [
-    "_test.py",
-    "test_*.py",
-    "__pycache__",
-    "*.lock",
-    "*.egg-info",
-    "*.pyc"
-]
+FILTER_PATTERNS = ["_test.py", "test_*.py", "__pycache__", "*.lock", "*.egg-info", "*.pyc"]
+
 
 def normalize_package_name(package_name: str) -> str:
     """Normalize a package name for import resolution."""
     return package_name.lower().replace("-", "_")
+
 
 def load_toolkit_from_package(package_name: str, show_packages: bool = False) -> Toolkit:
     """Attempt to load a Toolkit from an installed package name."""
@@ -94,6 +89,7 @@ def load_module_from_path(file_path: Path) -> ModuleType:
         raise ToolkitLoadError(f"Failed to load {file_path}")
 
     return module
+
 
 def collect_tools_from_modules(
     files_with_tools: list[tuple[Path, list[str]]],
@@ -159,43 +155,43 @@ def add_discovered_tools(
 def load_toolkits_for_option(tool_package: str, show_packages: bool = False) -> list[Toolkit]:
     """
     Load toolkits for a given package option.
-    
+
     Args:
         tool_package: Package name or comma-separated list of package names
         show_packages: Whether to log loaded packages
-        
+
     Returns:
         List of loaded toolkits
     """
     toolkits = []
     packages = [p.strip() for p in tool_package.split(",")]
-    
+
     for package in packages:
         try:
             toolkit = load_package(package, show_packages)
             toolkits.append(toolkit)
         except ToolkitLoadError as e:
             logger.warning(f"Failed to load package '{package}': {e}")
-            
+
     return toolkits
 
 
 def load_all_installed_toolkits(show_packages: bool = False) -> list[Toolkit]:
     """
     Discover and load all installed arcade toolkits.
-    
+
     Args:
         show_packages: Whether to log loaded packages
-        
+
     Returns:
         List of all installed toolkits
     """
     toolkits = Toolkit.find_all_arcade_toolkits()
-    
+
     if show_packages:
         for toolkit in toolkits:
             logger.info(f"Loading package: {toolkit.name}")
-            
+
     return toolkits
 
 

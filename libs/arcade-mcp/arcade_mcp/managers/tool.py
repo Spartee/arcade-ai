@@ -35,6 +35,8 @@ class ToolManager(Registry[MaterializedTool]):
         """
         super().__init__("tool")
         self.catalog = catalog
+        for tool in self.catalog:
+            self.add(tool.definition.fully_qualified_name, tool)
 
     async def list_tools(self) -> list[Tool]:
         """
