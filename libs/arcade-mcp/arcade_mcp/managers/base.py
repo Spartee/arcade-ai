@@ -1,143 +1,135 @@
 """
-Base Manager Class
+Base Async Managers
 
-Provides common functionality for component managers (tools, resources, prompts).
+Provides async-safe registries with RW locking, versioning, and subscriptions.
 """
 
-import logging
-from typing import Any, Callable, Generic, Iterator, Protocol, TypeVar
+from __future__ import annotations
 
-from arcade_mcp.exceptions import NotFoundError
+import asyncio
+from collections.abc import Callable, Iterable
+from typing import Generic, TypeVar, cast
 
-logger = logging.getLogger("arcade.mcp.managers")
-
-
-class ComponentProtocol(Protocol):
-    """Protocol that all managed components must implement.
-
-    Components must define equality so managers can determine whether
-    an incoming registration represents a no-op or an update.
-    """
-
-    def __eq__(self, other: object) -> bool:  # pragma: no cover - protocol definition
-        ...
+K = TypeVar("K")
+V = TypeVar("V")
 
 
-T = TypeVar("T", bound=ComponentProtocol)
+class AsyncRWLock:
+    """Simple async RW lock allowing concurrent readers and exclusive writers."""
+
+    def __init__(self) -> None:
+        self._reader_count = 0
+        self._reader_lock = asyncio.Lock()
+        self._gate = asyncio.Lock()
+
+    async def read(self):
+        class _ReadCtx:
+            async def __aenter__(_self):
+                async with self._reader_lock:
+                    self._reader_count += 1
+                    if self._reader_count == 1:
+                        await self._gate.acquire()
+
+            async def __aexit__(_self, exc_type, exc, tb):
+                async with self._reader_lock:
+                    self._reader_count -= 1
+                    if self._reader_count == 0:
+                        self._gate.release()
+
+        return _ReadCtx()
+
+    async def write(self):
+        class _WriteCtx:
+            async def __aenter__(_self):
+                await self._gate.acquire()
+
+            async def __aexit__(_self, exc_type, exc, tb):
+                self._gate.release()
+
+        return _WriteCtx()
 
 
-class ComponentManager(Generic[T]):
-    """
-    Base class for managing MCP components (tools, resources, prompts).
+class AsyncRegistry(Generic[K, V]):
+    """Async-safe registry with deterministic listing and change notifications."""
 
-    Provides common functionality for:
-    - Component registration
-    - Update notifications via callback
-    - Component lookup
-    """
+    def __init__(self, component: str) -> None:
+        self.component = component
+        self._items: dict[K, V] = {}
+        self._lock = AsyncRWLock()
+        self._version = 0
+        self._subscribers: list[Callable[[str, K | None, V | None, V | None, int], None]] = []
 
-    def __init__(
-        self,
-        component_type: str,
-        on_update: Callable[[str, T, T], None] | None = None,
-    ):
-        """
-        Initialize component manager.
+    def subscribe(self, fn: Callable[[str, K | None, V | None, V | None, int], None]) -> None:
+        self._subscribers.append(fn)
 
-        Args:
-            component_type: Type of component (e.g., "tool", "resource", "prompt")
-            on_update: Optional callback invoked when an existing component is updated.
-                Signature: (key, old_component, new_component) -> None
-        """
-        self.component_type = component_type
-        self._components: dict[str, T] = {}
-        # Default callback logs an info-level message
-        self._on_update: Callable[[str, T, T], None] = (
-            on_update
-            if on_update is not None
-            else lambda key, old, new: logger.info(
-                f"{self.component_type.title()} '{key}' updated"
-            )
-        )
+    async def get(self, key: K) -> V:
+        async with await self._lock.read():
+            if key not in self._items:
+                raise KeyError(f"{self.component.title()} '{key}' not found")
+            return self._items[key]
 
-    def add(self, key: str, component: T) -> None:
-        """
-        Add a component to the manager. If a component with the same key exists,
-        it will be compared using component equality. If equal, the operation is
-        a no-op. If not equal, the component will be replaced and the update
-        callback will be invoked.
+    async def keys(self) -> list[K]:
+        async with await self._lock.read():
+            return sorted(self._items.keys(), key=lambda k: str(k))
 
-        Args:
-            key: Unique key for the component
-            component: Component to add
-        """
-        if key in self._components:
-            existing = self._components[key]
-            if existing == component:
-                return
-            self._components[key] = component
-            self._on_update(key, existing, component)
-        else:
-            self._components[key] = component
+    async def list(self) -> list[V]:
+        async with await self._lock.read():
+            return [self._items[k] for k in sorted(self._items.keys(), key=lambda k: str(k))]
 
-    def remove(self, key: str) -> T:
-        """
-        Remove a component from the manager.
+    async def upsert(self, key: K, value: V) -> None:
+        async with await self._lock.write():
+            old = self._items.get(key)
+            self._items[key] = value
+            self._version += 1
+            version = self._version
+        for fn in self._subscribers:
+            fn("upsert", key, old, value, version)
 
-        Args:
-            key: Component key
+    async def remove(self, key: K) -> V:
+        async with await self._lock.write():
+            if key not in self._items:
+                raise KeyError(f"{self.component.title()} '{key}' not found")
+            old = self._items.pop(key)
+            self._version += 1
+            version = self._version
+        for fn in self._subscribers:
+            fn("remove", key, old, None, version)
+        return old
 
-        Returns:
-            The removed component
+    async def bulk_load(self, items: Iterable[tuple[K, V]]) -> None:
+        async with await self._lock.write():
+            for k, v in items:
+                self._items[k] = v
+            self._version += 1
+            version = self._version
+        for fn in self._subscribers:
+            fn("bulk_load", cast(K, None), None, None, version)
 
-        Raises:
-            NotFoundError: If component not found
-        """
-        if key not in self._components:
-            raise NotFoundError(f"{self.component_type.title()} '{key}' not found")
-        return self._components.pop(key)
+    @property
+    def version(self) -> int:
+        return self._version
 
-    def get(self, key: str) -> T:
-        """
-        Get a component by key.
 
-        Args:
-            key: Component key
+class ComponentManager(Generic[K, V]):
+    """Base component manager with lifecycle and async registry."""
 
-        Returns:
-            The component
+    def __init__(self, component: str) -> None:
+        self.registry: AsyncRegistry[K, V] = AsyncRegistry(component)
+        self._started = False
 
-        Raises:
-            NotFoundError: If component not found
-        """
-        if key not in self._components:
-            raise NotFoundError(f"{self.component_type.title()} '{key}' not found")
-        return self._components[key]
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
 
-    def has(self, key: str) -> bool:
-        """Check if a component exists."""
-        return key in self._components
+    async def stop(self) -> None:
+        if not self._started:
+            return
+        self._started = False
 
-    def list_keys(self) -> list[str]:
-        """List all component keys."""
-        return list(self._components.keys())
+    def subscribe(self, fn: Callable[[str, K | None, V | None, V | None, int], None]) -> None:
+        self.registry.subscribe(fn)
 
-    def list_components(self) -> list[T]:
-        """List all components."""
-        return list(self._components.values())
-
-    def clear(self) -> None:
-        """Clear all components."""
-        self._components.clear()
-
-    def __eq__(self, other: Any) -> bool:
-        """Check if two managers are equal."""
-        return isinstance(other, ComponentManager) and self._components == other._components
-
-    def __len__(self) -> int:
-        """Get the number of components."""
-        return len(self._components)
-
-    def __iter__(self) -> Iterator[T]:
-        """Iterate over components."""
-        return iter(self._components.values())
+    @property
+    def version(self) -> int:
+        return self.registry.version

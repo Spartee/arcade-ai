@@ -25,11 +25,12 @@ from arcade_mcp.settings import MCPSettings
 from arcade_mcp.worker import create_arcade_mcp, run_arcade_mcp
 
 __all__ = [
+    "Context",
     # FastAPI-like interface
     "MCPApp",
     # MCP Server implementation
     "MCPServer",
-    "Context",
+    "MCPSettings",
     # Integrated Factory and Runner
     "create_arcade_mcp",
     "run_arcade_mcp",

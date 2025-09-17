@@ -1,19 +1,19 @@
 """Tests for Error Handling Middleware."""
 
-import pytest
-from unittest.mock import Mock, patch
 import asyncio
+from unittest.mock import Mock, patch
 
-from arcade_mcp.middleware.error_handling import ErrorHandlingMiddleware
-from arcade_mcp.middleware.base import MiddlewareContext
-from arcade_mcp.types import JSONRPCError
+import pytest
 from arcade_mcp.exceptions import (
     MCPError,
     NotFoundError,
-    DuplicateError,
-    ValidationError,
     ToolError,
+    AuthorizationError,
+    ServerError,
 )
+from arcade_mcp.middleware.base import MiddlewareContext
+from arcade_mcp.middleware.error_handling import ErrorHandlingMiddleware
+from arcade_mcp.types import JSONRPCError
 
 
 class TestErrorHandlingMiddleware:
@@ -41,6 +41,7 @@ class TestErrorHandlingMiddleware:
     @pytest.mark.asyncio
     async def test_successful_request(self, error_middleware, context):
         """Test that successful requests pass through."""
+
         async def handler(ctx):
             return {"result": "success"}
 
@@ -51,6 +52,7 @@ class TestErrorHandlingMiddleware:
     @pytest.mark.asyncio
     async def test_not_found_error(self, error_middleware, context):
         """Test handling of NotFoundError."""
+
         async def handler(ctx):
             raise NotFoundError("Resource not found: test.txt")
 
@@ -62,32 +64,35 @@ class TestErrorHandlingMiddleware:
         assert "Resource not found: test.txt" in result.error["message"]
 
     @pytest.mark.asyncio
-    async def test_duplicate_error(self, error_middleware, context):
-        """Test handling of DuplicateError."""
+    async def test_server_error(self, error_middleware, context):
+        """Test handling of ServerError."""
+
         async def handler(ctx):
-            raise DuplicateError("Tool already exists: MyTool")
+            raise ServerError("Server operation failed")
 
         result = await error_middleware(context, handler)
 
         assert isinstance(result, JSONRPCError)
         assert result.error["code"] == -32603
-        assert "Tool already exists: MyTool" in result.error["message"]
+        assert "Server operation failed" in result.error["message"]
 
     @pytest.mark.asyncio
-    async def test_validation_error(self, error_middleware, context):
-        """Test handling of ValidationError."""
+    async def test_authorization_error(self, error_middleware, context):
+        """Test handling of AuthorizationError."""
+
         async def handler(ctx):
-            raise ValidationError("Invalid parameter: age must be positive")
+            raise AuthorizationError("User not authorized")
 
         result = await error_middleware(context, handler)
 
         assert isinstance(result, JSONRPCError)
         assert result.error["code"] == -32603
-        assert "Invalid parameter" in result.error["message"]
+        assert "User not authorized" in result.error["message"]
 
     @pytest.mark.asyncio
     async def test_tool_error(self, error_middleware, context):
         """Test handling of ToolError."""
+
         async def handler(ctx):
             raise ToolError("Tool execution failed: API rate limit")
 
@@ -100,6 +105,7 @@ class TestErrorHandlingMiddleware:
     @pytest.mark.asyncio
     async def test_generic_mcp_error(self, error_middleware, context):
         """Test handling of generic MCPError."""
+
         async def handler(ctx):
             raise MCPError("Something went wrong")
 
@@ -112,6 +118,7 @@ class TestErrorHandlingMiddleware:
     @pytest.mark.asyncio
     async def test_unexpected_error(self, error_middleware, context):
         """Test handling of unexpected exceptions."""
+
         async def handler(ctx):
             raise RuntimeError("Unexpected error occurred")
 
@@ -124,6 +131,7 @@ class TestErrorHandlingMiddleware:
     @pytest.mark.asyncio
     async def test_error_masking(self, error_middleware_masked, context):
         """Test error detail masking in production."""
+
         async def handler(ctx):
             raise RuntimeError("Sensitive internal error with secrets")
 
@@ -138,9 +146,11 @@ class TestErrorHandlingMiddleware:
     @pytest.mark.asyncio
     async def test_error_with_traceback(self, error_middleware, context):
         """Test that error response contains expected structure (no traceback in current impl)."""
+
         async def handler(ctx):
             def nested():
                 raise ValueError("Deep error")
+
             nested()
 
         result = await error_middleware(context, handler)
@@ -153,10 +163,7 @@ class TestErrorHandlingMiddleware:
     async def test_notification_error_handling(self, error_middleware):
         """Test error handling for notifications (no ID)."""
         # Notifications don't have an ID
-        context = MiddlewareContext(
-            message={"method": "notification/test"},
-            mcp_context=Mock()
-        )
+        context = MiddlewareContext(message={"method": "notification/test"}, mcp_context=Mock())
 
         async def handler(ctx):
             raise ValueError("Notification error")
@@ -165,12 +172,13 @@ class TestErrorHandlingMiddleware:
         result = await error_middleware(context, handler)
 
         assert isinstance(result, JSONRPCError)
-        assert hasattr(result, 'id')
+        assert hasattr(result, "id")
 
     @pytest.mark.asyncio
     async def test_error_logging(self, error_middleware, context):
         """Test that errors are logged appropriately."""
-        with patch('arcade_mcp.middleware.error_handling.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.error_handling.logger") as mock_logger:
+
             async def handler(ctx):
                 raise ToolError("Tool failed")
 
@@ -186,12 +194,13 @@ class TestErrorHandlingMiddleware:
         """Test that error codes map per implementation."""
         test_cases = [
             (NotFoundError("Not found"), -32601),
-            (ValidationError("Invalid"), -32603),
+            (AuthorizationError("Unauthorized"), -32603),
             (ToolError("Tool error"), -32603),
             (RuntimeError("Boom"), -32603),
         ]
 
         for error, expected_code in test_cases:
+
             async def handler(ctx, e=error):
                 raise e
 
@@ -220,9 +229,10 @@ class TestErrorHandlingMiddleware:
     @pytest.mark.asyncio
     async def test_async_error_handling(self, error_middleware, context):
         """Test handling of errors in async operations."""
+
         async def handler(ctx):
             await asyncio.sleep(0.01)
-            raise IOError("Async operation failed")
+            raise OSError("Async operation failed")
 
         result = await error_middleware(context, handler)
 
@@ -232,6 +242,7 @@ class TestErrorHandlingMiddleware:
     @pytest.mark.asyncio
     async def test_chained_error_handling(self, error_middleware, context):
         """Test error handling with chained exceptions."""
+
         async def handler(ctx):
             try:
                 raise ValueError("Original error")

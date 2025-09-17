@@ -34,18 +34,16 @@ class LoggingMiddleware(Middleware):
         try:
             # Process the message
             result = await call_next(context)
-
-            # Log success
-            elapsed = time.time() - start_time
-            self._log_response(context, result, elapsed)
-
-            return result
-
         except Exception as e:
             # Log error
             elapsed = time.time() - start_time
             self._log_error(context, e, elapsed)
             raise
+        else:
+            # Log success
+            elapsed = time.time() - start_time
+            self._log_response(context, result, elapsed)
+            return result
 
     def _log_request(self, context: MiddlewareContext[Any]) -> None:
         """Log incoming request."""
@@ -88,7 +86,7 @@ class LoggingMiddleware(Middleware):
         elapsed_ms = int(elapsed * 1000)
 
         # Build log message
-        parts = [f"[RESPONSE]", f"method={method}", f"elapsed={elapsed_ms}ms"]
+        parts = ["[RESPONSE]", f"method={method}", f"elapsed={elapsed_ms}ms"]
 
         if context.request_id:
             parts.append(f"request_id={context.request_id}")
@@ -113,11 +111,11 @@ class LoggingMiddleware(Middleware):
         method = context.method or "unknown"
         elapsed_ms = int(elapsed * 1000)
 
-        parts = [f"[ERROR]", f"method={method}", f"elapsed={elapsed_ms}ms"]
+        parts = ["[ERROR]", f"method={method}", f"elapsed={elapsed_ms}ms"]
 
         if context.request_id:
             parts.append(f"request_id={context.request_id}")
 
-        parts.append(f"error={type(error).__name__}: {str(error)}")
+        parts.append(f"error={type(error).__name__}: {error!s}")
 
         logger.error(" ".join(parts))

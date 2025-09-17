@@ -5,7 +5,7 @@ Provides Pydantic-based settings with validation and environment variable suppor
 """
 
 import os
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
@@ -132,35 +132,31 @@ class ArcadeSettings(BaseSettings):
     api_key: str | None = Field(
         default=None,
         description="Arcade API key",
-        env="ARCADE_API_KEY",
     )
     api_url: str = Field(
         default="https://api.arcade.dev",
         description="Arcade API URL",
-        env="ARCADE_API_URL",
     )
     auth_disabled: bool = Field(
         default=False,
         description="Disable authentication",
-        env="ARCADE_AUTH_DISABLED",
     )
     server_secret: str | None = Field(
         default="dev",
         description="Server secret",
-        env="ARCADE_WORKER_SECRET",
+        validation_alias="ARCADE_WORKER_SECRET",
     )
     environment: str = Field(
         default="dev",
         description="Environment (dev or prod.)",
-        env="ARCADE_ENVIRONMENT",
     )
-    dev_user_id: str | None = Field(
+    user_id: str | None = Field(
         default=None,
-        description="User ID for dev environment",
-        env="ARCADE_USER_ID",
+        description="User ID for Arcade environment",
     )
 
     model_config = {"env_prefix": "ARCADE_"}
+
 
 class ToolEnvironmentSettings(BaseSettings):
     """Tool environment settings.
@@ -170,6 +166,7 @@ class ToolEnvironmentSettings(BaseSettings):
     will be added to the tool environment as an
     available tool secret in the ToolContext
     """
+
     tool_environment: dict[str, Any] = Field(
         default_factory=dict,
         description="Tool environment",
@@ -178,9 +175,10 @@ class ToolEnvironmentSettings(BaseSettings):
     def model_post_init(self, __context: Any) -> None:
         """Populate tool_environment from process env if not provided."""
         if not self.tool_environment:
-            excluded_prefixes = ("MCP_", "ARCADE_")
+            excluded_prefixes = ("MCP_", "_")
             self.tool_environment = {
-                key: value for key, value in os.environ.items()
+                key: value
+                for key, value in os.environ.items()
                 if not any(key.startswith(prefix) for prefix in excluded_prefixes)
             }
 
@@ -191,6 +189,7 @@ class ToolEnvironmentSettings(BaseSettings):
         "case_sensitive": False,
         "extra": "allow",
     }
+
 
 class MCPSettings(BaseSettings):
     """Main MCP settings container."""
@@ -225,7 +224,6 @@ class MCPSettings(BaseSettings):
     debug: bool = Field(
         default=False,
         description="Enable debug mode",
-        env="MCP_DEBUG",
     )
 
     model_config = {

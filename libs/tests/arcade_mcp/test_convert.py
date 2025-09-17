@@ -1,29 +1,25 @@
 """Tests for MCP content conversion utilities."""
 
-import pytest
 import base64
 import json
 from typing import Annotated
 
-from arcade_mcp.convert import convert_to_mcp_content, create_mcp_tool
-from arcade_core.catalog import MaterializedTool, ToolMeta
+import pytest
+from arcade_core.catalog import MaterializedTool, ToolMeta, create_func_models
 from arcade_core.schema import (
+    InputParameter,
     ToolDefinition,
     ToolInput,
-    ToolOutput,
     ToolkitDefinition,
+    ToolOutput,
     ToolRequirements,
-    InputParameter,
     ValueSchema,
-    FullyQualifiedName,
 )
-from arcade_core.catalog import create_func_models
+from arcade_mcp.convert import convert_to_mcp_content, create_mcp_tool
 from arcade_tdk import tool
 
 # Small PNG header (1x1 transparent pixel) used for byte-image param tests
-PNG_BYTES = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
-)
+PNG_BYTES = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
 
 
 class TestConvertToMCPContent:
@@ -58,8 +54,8 @@ class TestConvertToMCPContent:
 
         assert isinstance(result, list)
         assert len(result) == 1
-        assert result[0]["type"] == "text"
-        text = result[0]["text"]
+        assert result[0].type == "text"
+        text = result[0].text
 
         if decode_b64:
             decoded = base64.b64decode(text)
@@ -86,9 +82,9 @@ class TestConvertToMCPContent:
         """Parameterize JSON-serializable structures and assert round-trip equality."""
         result = convert_to_mcp_content(data)
         assert len(result) == 1
-        assert result[0]["type"] == "text"
+        assert result[0].type == "text"
 
-        parsed = json.loads(result[0]["text"])
+        parsed = json.loads(result[0].text)
         assert parsed == data
 
     def test_convert_circular_reference(self):
@@ -104,6 +100,7 @@ class TestConvertToMCPContent:
 
     def test_convert_custom_objects(self):
         """Test converting custom objects."""
+
         class CustomObject:
             def __str__(self):
                 return "CustomObject instance"
@@ -115,7 +112,7 @@ class TestConvertToMCPContent:
         result = convert_to_mcp_content(obj)
 
         # Should use string representation
-        assert "CustomObject" in result[0]["text"]
+        assert "CustomObject" in result[0].text
 
 
 class TestCreateMCPTool:
@@ -159,13 +156,14 @@ class TestCreateMCPTool:
     @pytest.fixture
     def materialized_tool(self, sample_tool_def):
         """Create a materialized tool."""
+
         @tool
         def calculate(
-            expression: Annotated[str, "Math expression"],
+            expression: Annotated[str, "Math expression"] = "1 + 1",
             precision: Annotated[int, "Decimal precision"] = 2,
         ) -> Annotated[float, "Calculation result"]:
             """Perform a calculation."""
-            return round(eval(expression), precision)
+            return round(eval(expression), precision)  # noqa: S307
 
         input_model, output_model = create_func_models(calculate)
         meta = ToolMeta(module=calculate.__module__, toolkit=sample_tool_def.toolkit.name)
@@ -181,13 +179,14 @@ class TestCreateMCPTool:
         """Test creating basic MCP tool."""
         mcp_tool = create_mcp_tool(materialized_tool)
 
-        assert mcp_tool["name"] == "MathToolkit_calculate"
-        assert "inputSchema" in mcp_tool
+        assert mcp_tool.name == "MathToolkit_calculate"
+        # ensure input schema present
+        assert isinstance(mcp_tool.inputSchema, dict)
 
     def test_tool_input_schema(self, materialized_tool):
         """Test tool input schema generation."""
         mcp_tool = create_mcp_tool(materialized_tool)
-        schema = mcp_tool["inputSchema"]
+        schema = mcp_tool.inputSchema
 
         assert schema["type"] == "object"
         assert "properties" in schema
@@ -248,7 +247,7 @@ class TestCreateMCPTool:
         )
 
         mcp_tool = create_mcp_tool(mat_tool)
-        param_schema = mcp_tool["inputSchema"]["properties"]["param"]
+        param_schema = mcp_tool.inputSchema["properties"]["param"]
         assert param_schema["type"] == json_type
 
     def test_array_parameter(self):
@@ -290,7 +289,7 @@ class TestCreateMCPTool:
         )
 
         mcp_tool = create_mcp_tool(mat_tool)
-        param_schema = mcp_tool["inputSchema"]["properties"]["items"]
+        param_schema = mcp_tool.inputSchema["properties"]["items"]
 
         assert param_schema["type"] == "array"
         assert param_schema["items"]["type"] == "string"
@@ -334,7 +333,7 @@ class TestCreateMCPTool:
         )
 
         mcp_tool = create_mcp_tool(mat_tool)
-        param_schema = mcp_tool["inputSchema"]["properties"]["color"]
+        param_schema = mcp_tool.inputSchema["properties"]["color"]
 
         assert param_schema["type"] == "string"
         assert param_schema["enum"] == ["red", "green", "blue"]
@@ -366,7 +365,7 @@ class TestCreateMCPTool:
         )
 
         mcp_tool = create_mcp_tool(mat_tool)
-        schema = mcp_tool["inputSchema"]
+        schema = mcp_tool.inputSchema
 
         assert schema["type"] == "object"
         assert schema["properties"] == {}

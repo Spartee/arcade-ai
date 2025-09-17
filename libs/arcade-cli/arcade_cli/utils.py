@@ -16,6 +16,11 @@ import idna
 import typer
 from arcade_core import ToolCatalog, Toolkit
 from arcade_core.config_model import Config
+from arcade_core.discovery import (
+    build_catalog_from_toolkits,
+    load_all_installed_toolkits,
+    load_toolkits_for_option,
+)
 from arcade_core.errors import ToolkitLoadError
 from arcade_core.schema import ToolDefinition
 from arcadepy import (
@@ -70,32 +75,25 @@ def create_cli_catalog(
     show_toolkits: bool = False,
 ) -> ToolCatalog:
     """
-    Load toolkits from the python environment.
+    Load toolkits from the python environment using centralized discovery.
     """
     if toolkit:
-        toolkit = toolkit.lower().replace("-", "_")
+        # Use load_toolkits_for_option from arcade-core
         try:
-            prefixed_toolkit = "arcade_" + toolkit
-            toolkits = [Toolkit.from_package(prefixed_toolkit)]
-        except ToolkitLoadError:
-            try:  # try without prefix
-                toolkits = [Toolkit.from_package(toolkit)]
-            except ToolkitLoadError as e:
-                console.print(f"❌ {e}", style="bold red")
-                typer.Exit(code=1)
+            toolkits = load_toolkits_for_option(toolkit, show_packages=show_toolkits)
+        except ToolkitLoadError as e:
+            console.print(f"❌ {e}", style="bold red")
+            raise typer.Exit(code=1)
     else:
-        toolkits = Toolkit.find_all_arcade_toolkits()
+        # Use load_all_installed_toolkits from arcade-core
+        toolkits = load_all_installed_toolkits(show_packages=show_toolkits)
 
     if not toolkits:
         console.print("❌ No toolkits found or specified", style="bold red")
-        typer.Exit(code=1)
+        raise typer.Exit(code=1)
 
-    catalog = ToolCatalog()
-    for loaded_toolkit in toolkits:
-        if show_toolkits:
-            console.print(f"Loading toolkit: {loaded_toolkit.name}", style="bold blue")
-        catalog.add_toolkit(loaded_toolkit)
-    return catalog
+    # Use build_catalog_from_toolkits from arcade-core
+    return build_catalog_from_toolkits(toolkits)
 
 
 def compute_base_url(
@@ -715,7 +713,7 @@ def discover_toolkits() -> list[Toolkit]:
     Raises:
         RuntimeError: If no toolkits are found, mirroring the behaviour of Toolkit discovery elsewhere.
     """
-    toolkits = Toolkit.find_all_arcade_toolkits()
+    toolkits = load_all_installed_toolkits(show_packages=False)
     if not toolkits:
         raise RuntimeError("No toolkits found in Python environment.")
     return toolkits
@@ -731,10 +729,8 @@ def build_tool_catalog(toolkits: list[Toolkit]) -> ToolCatalog:
     Returns:
         ToolCatalog
     """
-    catalog = ToolCatalog()
-    for tk in toolkits:
-        catalog.add_toolkit(tk)
-    return catalog
+    # Use the centralized function from arcade-core
+    return build_catalog_from_toolkits(toolkits)
 
 
 def _parse_line(line: str) -> tuple[str, str] | None:

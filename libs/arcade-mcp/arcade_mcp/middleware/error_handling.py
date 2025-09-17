@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from arcade_mcp.middleware.base import CallNext, Middleware, MiddlewareContext
-from arcade_mcp.types import CallToolResult, ContentBlock, JSONRPCError
+from arcade_mcp.types import CallToolResult, JSONRPCError
 
 logger = logging.getLogger("arcade.mcp")
 
@@ -45,7 +45,7 @@ class ErrorHandlingMiddleware(Middleware):
             logger.exception(f"Error calling tool: {error_message}")
 
             return CallToolResult(
-                content=[ContentBlock(type="text", text=error_message)],
+                content=[{"type": "text", "text": error_message}],
                 isError=True,
             )
 
@@ -67,7 +67,7 @@ class ErrorHandlingMiddleware(Middleware):
             error={
                 "code": self._get_error_code(error),
                 "message": error_message,
-            }
+            },
         )
 
     def _get_error_message(self, error: Exception) -> str:

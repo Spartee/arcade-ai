@@ -5,15 +5,17 @@ Creates a FastAPI application that exposes both Arcade Worker endpoints and
 MCP Server endpoints over HTTP/SSE. MCP is always enabled in this integrated mode.
 """
 
-import uvicorn
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
+from typing import Any
 
-from fastapi import FastAPI, Request
+import uvicorn
 from arcade_core.catalog import ToolCatalog
 from arcade_serve.fastapi.worker import FastAPIWorker
+from fastapi import FastAPI
 from loguru import logger
 from starlette.responses import Response
+from starlette.types import Receive, Scope, Send
 
 from arcade_mcp.server import MCPServer
 from arcade_mcp.settings import MCPSettings
@@ -34,6 +36,19 @@ async def create_lifespan(
     if mcp_settings is None:
         mcp_settings = MCPSettings.from_env()
 
+    try:
+        tool_env_keys = sorted(mcp_settings.tool_secrets().keys())
+        logger.debug(
+            f"Arcade settings: \n\
+                ARCADE_ENVIRONMENT={mcp_settings.arcade.environment} \n\
+                ARCADE_API_URL={mcp_settings.arcade.api_url}, \n\
+                ARCADE_USER_ID={mcp_settings.arcade.user_id}, \n\
+                api_key_present - {bool(mcp_settings.arcade.api_key)}"
+        )
+        logger.debug(f"Tool environment variable names available to tools: {tool_env_keys}")
+    except Exception as e:
+        logger.debug(f"Unable to log settings/tool env keys: {e}")
+
     mcp_server = MCPServer(
         catalog,
         settings=mcp_settings,
@@ -45,14 +60,14 @@ async def create_lifespan(
         json_response=True,
     )
 
-    await mcp_server._start()
+    await mcp_server.start()
     async with session_manager.run():
         logger.info("MCP server started and ready for connections")
         yield {
             "mcp_server": mcp_server,
             "session_manager": session_manager,
         }
-    await mcp_server._stop()
+    await mcp_server.stop()
 
 
 def create_arcade_mcp(
@@ -70,14 +85,10 @@ def create_arcade_mcp(
         mcp_settings = MCPSettings.from_env()
     secret = mcp_settings.arcade.server_secret
     if secret is None:
-        secret = "dev"
-        auth_disabled = True
-
+        secret = "dev"  # noqa: S105
 
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        async with create_lifespan(
-            catalog, mcp_settings, **kwargs
-        ) as components:
+        async with create_lifespan(catalog, mcp_settings, **kwargs) as components:
             app.state.mcp_server = components["mcp_server"]
             app.state.session_manager = components["session_manager"]
             yield
@@ -104,7 +115,7 @@ def create_arcade_mcp(
         def __init__(self, parent_app: FastAPI):
             self._app = parent_app
 
-        async def __call__(self, scope, receive, send):
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
             session_manager = getattr(self._app.state, "session_manager", None)
             if session_manager is None:
                 resp = Response("MCP server not initialized", status_code=503)
@@ -112,7 +123,50 @@ def create_arcade_mcp(
                 return
             await session_manager.handle_request(scope, receive, send)
 
-    app.mount("/mcp", _MCPASGIProxy(app))
+    # Mount the actual ASGI proxy to handle all /mcp requests
+    app.mount("/mcp", _MCPASGIProxy(app), name="mcp-proxy")
+
+    # Customize OpenAPI to include MCP documentation
+    def custom_openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+
+        # Get the default OpenAPI schema
+        from fastapi.openapi.utils import get_openapi
+
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+
+        # Add MCP routes to the schema
+        from arcade_mcp.fastapi.routes import MCPError, MCPRequest, MCPResponse, get_openapi_routes
+
+        # Add MCP schemas
+        if "components" not in openapi_schema:
+            openapi_schema["components"] = {}
+        if "schemas" not in openapi_schema["components"]:
+            openapi_schema["components"]["schemas"] = {}
+
+        # Add schema definitions
+        openapi_schema["components"]["schemas"]["MCPRequest"] = MCPRequest.model_json_schema()
+        openapi_schema["components"]["schemas"]["MCPResponse"] = MCPResponse.model_json_schema()
+        openapi_schema["components"]["schemas"]["MCPError"] = MCPError.model_json_schema()
+
+        # Add MCP paths
+        if "paths" not in openapi_schema:
+            openapi_schema["paths"] = {}
+
+        for route_def in get_openapi_routes():
+            path = route_def["path"]
+            openapi_schema["paths"][path] = {k: v for k, v in route_def.items() if k != "path"}
+
+        app.openapi_schema = openapi_schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi
 
     return app
 

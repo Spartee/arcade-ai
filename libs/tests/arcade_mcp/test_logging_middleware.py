@@ -1,19 +1,15 @@
 """Tests for Logging Middleware."""
 
 import asyncio
-import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, Mock, patch
-import time
 import logging
+from unittest.mock import Mock, patch
 
-from arcade_mcp.middleware.logging import LoggingMiddleware
+import pytest
 from arcade_mcp.middleware.base import MiddlewareContext
+from arcade_mcp.middleware.logging import LoggingMiddleware
 from arcade_mcp.types import (
-    JSONRPCResponse,
     JSONRPCError,
-    CallToolRequest,
-    ListToolsRequest,
+    JSONRPCResponse,
 )
 
 
@@ -40,17 +36,18 @@ class TestLoggingMiddleware:
             request_id="req-123",
             session_id="sess-456",
             source="client",
-            type="request"
+            type="request",
         )
 
     @pytest.mark.asyncio
     async def test_request_logging(self, logging_middleware, context):
         """Test that requests are logged."""
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
+
             async def handler(ctx):
                 return {"result": "success"}
 
-            result = await logging_middleware(context, handler)
+            await logging_middleware(context, handler)
 
             # Should log the request using log() method, not info()
             mock_logger.log.assert_called()
@@ -64,11 +61,12 @@ class TestLoggingMiddleware:
     @pytest.mark.asyncio
     async def test_response_logging(self, logging_middleware, context):
         """Test that responses are logged."""
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
+
             async def handler(ctx):
                 return JSONRPCResponse(id=1, result={"status": "ok"})
 
-            result = await logging_middleware(context, handler)
+            await logging_middleware(context, handler)
 
             # Should log both request and response
             assert mock_logger.log.call_count >= 2
@@ -86,11 +84,12 @@ class TestLoggingMiddleware:
     @pytest.mark.asyncio
     async def test_error_response_logging(self, logging_middleware, context):
         """Test that error responses are logged."""
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
+
             async def handler(ctx):
                 return JSONRPCError(id=1, error={"code": -32603, "message": "Internal error"})
 
-            result = await logging_middleware(context, handler)
+            await logging_middleware(context, handler)
 
             # Should log response even for error responses
             response_logged = False
@@ -103,7 +102,8 @@ class TestLoggingMiddleware:
     @pytest.mark.asyncio
     async def test_exception_logging(self, logging_middleware, context):
         """Test that exceptions are logged."""
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
+
             async def handler(ctx):
                 raise ValueError("Test exception")
 
@@ -120,13 +120,14 @@ class TestLoggingMiddleware:
     @pytest.mark.asyncio
     async def test_timing_information(self, logging_middleware, context):
         """Test that timing information is included."""
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
+
             async def handler(ctx):
                 # Simulate some work
                 await asyncio.sleep(0.05)
                 return {"result": "success"}
 
-            result = await logging_middleware(context, handler)
+            await logging_middleware(context, handler)
 
             # Find response log with timing
             timing_logged = False
@@ -141,14 +142,14 @@ class TestLoggingMiddleware:
     @pytest.mark.asyncio
     async def test_debug_level_logging(self, debug_logging_middleware, context):
         """Test debug level logging includes more details."""
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
             # Set logger level to debug
             mock_logger.isEnabledFor.return_value = True
 
             async def handler(ctx):
                 return {"result": "success", "data": {"nested": "value"}}
 
-            result = await debug_logging_middleware(context, handler)
+            await debug_logging_middleware(context, handler)
 
             # Should have log calls at debug level
             mock_logger.log.assert_called()
@@ -162,14 +163,15 @@ class TestLoggingMiddleware:
             message={"method": "notifications/test"},
             mcp_context=Mock(),
             method="notifications/test",
-            type="notification"
+            type="notification",
         )
 
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
+
             async def handler(ctx):
                 return None  # Notifications typically return None
 
-            result = await logging_middleware(context, handler)
+            await logging_middleware(context, handler)
 
             # Should log notification
             mock_logger.log.assert_called()
@@ -186,20 +188,18 @@ class TestLoggingMiddleware:
         # Create middleware with high log level
         middleware = LoggingMiddleware(log_level="ERROR")
 
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
             # Configure mock logger level
             mock_logger.isEnabledFor.side_effect = lambda level: level >= logging.ERROR
 
             context = MiddlewareContext(
-                message={"id": 1, "method": "test"},
-                mcp_context=Mock(),
-                method="test"
+                message={"id": 1, "method": "test"}, mcp_context=Mock(), method="test"
             )
 
             async def handler(ctx):
                 return {"result": "success"}
 
-            result = await middleware(context, handler)
+            await middleware(context, handler)
 
             # Should not log info level messages
             mock_logger.info.assert_not_called()
@@ -214,14 +214,11 @@ class TestLoggingMiddleware:
         params_mock.name = "MyTool"  # Set as attribute, not in constructor
         params_mock.arguments = {"x": 1}
         message.params = params_mock
-        
-        tool_context = MiddlewareContext(
-            message=message,
-            mcp_context=Mock(),
-            method="tools/call"
-        )
 
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        tool_context = MiddlewareContext(message=message, mcp_context=Mock(), method="tools/call")
+
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
+
             async def handler(ctx):
                 return {"result": "tool result"}
 
@@ -238,7 +235,8 @@ class TestLoggingMiddleware:
     @pytest.mark.asyncio
     async def test_session_tracking(self, logging_middleware, context):
         """Test that session ID is included in logs."""
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
+
             async def handler(ctx):
                 return {"result": "success"}
 
@@ -258,16 +256,13 @@ class TestLoggingMiddleware:
         # Create a large message
         large_data = "x" * 10000
         context = MiddlewareContext(
-            message={
-                "id": 1,
-                "method": "test",
-                "params": {"data": large_data}
-            },
+            message={"id": 1, "method": "test", "params": {"data": large_data}},
             mcp_context=Mock(),
-            method="test"
+            method="test",
         )
 
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
+
             async def handler(ctx):
                 return {"result": large_data}
 
@@ -283,7 +278,7 @@ class TestLoggingMiddleware:
     @pytest.mark.asyncio
     async def test_concurrent_request_logging(self, logging_middleware):
         """Test logging handles concurrent requests correctly."""
-        with patch('arcade_mcp.middleware.logging.logger') as mock_logger:
+        with patch("arcade_mcp.middleware.logging.logger") as mock_logger:
             # Track which requests were logged
             logged_ids = set()
 
@@ -291,7 +286,8 @@ class TestLoggingMiddleware:
                 # Extract request IDs from log messages
                 if "req-" in msg:
                     import re
-                    match = re.search(r'req-(\d+)', msg)
+
+                    match = re.search(r"req-(\d+)", msg)
                     if match:
                         logged_ids.add(match.group(1))
 
@@ -303,7 +299,7 @@ class TestLoggingMiddleware:
                     message={"id": req_id, "method": "test"},
                     mcp_context=Mock(),
                     method="test",
-                    request_id=f"req-{req_id}"
+                    request_id=f"req-{req_id}",
                 )
 
                 async def handler(c):
@@ -313,7 +309,7 @@ class TestLoggingMiddleware:
                 return await logging_middleware(ctx, handler)
 
             # Run concurrent requests
-            results = await asyncio.gather(*[make_request(i) for i in range(5)])
+            await asyncio.gather(*[make_request(i) for i in range(5)])
 
             # All requests should be logged
             assert len(logged_ids) >= 5
@@ -321,8 +317,12 @@ class TestLoggingMiddleware:
     def test_log_level_configuration(self):
         """Test log level configuration."""
         # Test different log levels
-        for level_str, level_int in [("DEBUG", logging.DEBUG), ("INFO", logging.INFO), 
-                                      ("WARNING", logging.WARNING), ("ERROR", logging.ERROR)]:
+        for level_str, level_int in [
+            ("DEBUG", logging.DEBUG),
+            ("INFO", logging.INFO),
+            ("WARNING", logging.WARNING),
+            ("ERROR", logging.ERROR),
+        ]:
             middleware = LoggingMiddleware(log_level=level_str)
             assert middleware.log_level == level_int
 

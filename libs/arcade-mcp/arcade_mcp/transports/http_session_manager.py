@@ -3,10 +3,11 @@
 Manages HTTP streaming sessions with optional resumability via event store.
 """
 
-import asyncio
 import contextlib
 import logging
-from typing import Any, AsyncIterator, Optional
+from collections.abc import AsyncIterator
+from http import HTTPStatus
+from typing import Optional
 from uuid import uuid4
 
 import anyio
@@ -14,14 +15,13 @@ from anyio.abc import TaskStatus
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
-from http import HTTPStatus
 
 from arcade_mcp.server import MCPServer
 from arcade_mcp.session import ServerSession
 from arcade_mcp.transports.http_streamable import (
-    HTTPStreamableTransport,
-    EventStore,
     MCP_SESSION_ID_HEADER,
+    EventStore,
+    HTTPStreamableTransport,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,7 +139,9 @@ class HTTPSessionManager:
         )
 
         # Start server in a new task
-        async def run_stateless_server(*, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED):
+        async def run_stateless_server(
+            *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
+        ) -> None:
             async with http_transport.connect() as streams:
                 read_stream, write_stream = streams
                 task_status.started()
@@ -162,7 +164,8 @@ class HTTPSessionManager:
                 except Exception:
                     logger.exception("Stateless session crashed")
 
-        assert self._task_group is not None
+        if self._task_group is None:
+            raise RuntimeError("Task group not initialized")
         await self._task_group.start(run_stateless_server)
 
         # Handle the HTTP request
@@ -199,12 +202,15 @@ class HTTPSessionManager:
                     event_store=self.event_store,
                 )
 
-                assert http_transport.mcp_session_id is not None
+                if http_transport.mcp_session_id is None:
+                    raise RuntimeError("MCP session ID not set")
                 self._server_instances[http_transport.mcp_session_id] = http_transport
                 logger.info(f"Created new transport with session ID: {new_session_id}")
 
                 # Define the server runner
-                async def run_server(*, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED) -> None:
+                async def run_server(
+                    *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
+                ) -> None:
                     async with http_transport.connect() as streams:
                         read_stream, write_stream = streams
                         task_status.started()
@@ -241,7 +247,8 @@ class HTTPSessionManager:
                                 )
                                 del self._server_instances[http_transport.mcp_session_id]
 
-                assert self._task_group is not None
+                if self._task_group is None:
+                    raise RuntimeError("Task group not initialized")
                 await self._task_group.start(run_server)
 
                 # Handle the HTTP request

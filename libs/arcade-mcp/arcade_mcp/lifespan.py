@@ -8,15 +8,17 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable
+
+from arcade_mcp.exceptions import LifespanError
 
 logger = logging.getLogger("arcade.mcp")
 
-LifespanResultT = TypeVar("LifespanResultT")
+LifespanResult = dict[str, Any]
 
 
 @asynccontextmanager
-async def default_lifespan(server: Any) -> AsyncIterator[dict[str, Any]]:
+async def default_lifespan(server: Any) -> AsyncIterator[LifespanResult]:
     """Default lifespan that does basic startup/shutdown logging."""
     logger.info(f"Starting MCP server: {getattr(server, 'name', 'unknown')}")
 
@@ -38,9 +40,7 @@ class LifespanManager:
     def __init__(
         self,
         server: Any,
-        lifespan: Callable[
-            [Any], AbstractAsyncContextManager[LifespanResultT]
-        ] | None = None,
+        lifespan: Callable[[Any], AbstractAsyncContextManager[LifespanResult]] | None = None,
     ):
         """Initialize lifespan manager.
 
@@ -51,13 +51,13 @@ class LifespanManager:
         self.server = server
         self.lifespan = lifespan or default_lifespan
         self._stack: Any | None = None
-        self._context: LifespanResultT | None = None
+        self._context: LifespanResult | None = None
         self._started = False
 
-    async def startup(self) -> LifespanResultT:
+    async def startup(self) -> LifespanResult:
         """Run startup phase of lifespan."""
         if self._started:
-            raise RuntimeError("Lifespan already started")
+            raise LifespanError("Lifespan already started")
 
         self._stack = asyncio.create_task(self._run_lifespan())
 
@@ -70,10 +70,11 @@ class LifespanManager:
             try:
                 await self._stack
             except Exception as e:
-                raise RuntimeError(f"Lifespan startup failed: {e}") from e
+                raise LifespanError(f"Lifespan startup failed: {e}") from e
 
-        self._started = True
-        return self._context  # type: ignore[return-value]
+        if self._context is None:
+            raise LifespanError("Lifespan startup failed")
+        return self._context
 
     async def shutdown(self) -> None:
         """Run shutdown phase of lifespan."""
@@ -113,7 +114,7 @@ class LifespanManager:
             logger.exception("Error in lifespan")
             raise
 
-    async def __aenter__(self) -> LifespanResultT:
+    async def __aenter__(self) -> LifespanResult:
         """Async context manager entry."""
         return await self.startup()
 
@@ -123,28 +124,27 @@ class LifespanManager:
 
 
 def compose_lifespans(
-    *lifespans: Callable[[Any], AbstractAsyncContextManager[Any]]
-) -> Callable[[Any], AbstractAsyncContextManager[dict[str, Any]]]:
+    *lifespans: Callable[[Any], AbstractAsyncContextManager[LifespanResult]],
+) -> Callable[[Any], AbstractAsyncContextManager[LifespanResult]]:
     """Compose multiple lifespan functions into one.
 
     Each lifespan's context is merged into a single dict.
     Lifespans are started in order and stopped in reverse order.
     """
+
     @asynccontextmanager
-    async def composed(server: Any) -> AsyncIterator[dict[str, Any]]:
-        contexts: list[Any] = []
-        merged: dict[str, Any] = {}
+    async def composed(server: Any) -> AsyncIterator[LifespanResult]:
+        contexts: list[tuple[AbstractAsyncContextManager[LifespanResult], LifespanResult]] = []
+        merged: LifespanResult = {}
 
-        # Start lifespans in order
-        async with asyncio.TaskGroup() as tg:
-            for lifespan in lifespans:
-                ctx_mgr = lifespan(server)
-                context = await ctx_mgr.__aenter__()
-                contexts.append((ctx_mgr, context))
+        # Start lifespans in order (sequential for compatibility)
+        for lifespan in lifespans:
+            ctx_mgr = lifespan(server)
+            context = await ctx_mgr.__aenter__()
+            contexts.append((ctx_mgr, context))
 
-                # Merge context if it's a dict
-                if isinstance(context, dict):
-                    merged.update(context)
+            # Merge context if it's a dict
+            merged.update(context)
 
         try:
             yield merged

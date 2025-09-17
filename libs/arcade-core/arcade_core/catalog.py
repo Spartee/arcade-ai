@@ -988,7 +988,7 @@ def create_func_models(func: Callable) -> tuple[type[BaseModel], type[BaseModel]
     return input_model, output_model
 
 
-def determine_output_model(func: Callable) -> type[BaseModel]:  # noqa: C901
+def determine_output_model(func: Callable) -> type[BaseModel]:
     """
     Determine the output model for a function based on its return annotation.
     """

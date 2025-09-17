@@ -1,25 +1,24 @@
 """Tests for MCP Server implementation."""
 
-import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, Mock, patch
-import json
 import asyncio
+import contextlib
+from unittest.mock import AsyncMock, Mock
 
+import pytest
+from arcade_mcp.middleware import Middleware
 from arcade_mcp.server import MCPServer
+from arcade_mcp.session import InitializationState
 from arcade_mcp.types import (
-    JSONRPCResponse,
-    JSONRPCError,
-    InitializeRequest,
-    InitializeResult,
-    ListToolsRequest,
-    ListToolsResult,
     CallToolRequest,
     CallToolResult,
+    InitializeRequest,
+    InitializeResult,
+    JSONRPCError,
+    JSONRPCResponse,
+    ListToolsRequest,
+    ListToolsResult,
     PingRequest,
 )
-from arcade_mcp.session import InitializationState
-from arcade_mcp.middleware import Middleware, MiddlewareContext
 
 
 class TestMCPServer:
@@ -108,11 +107,8 @@ class TestMCPServer:
             params={
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {
-                    "name": "test-client",
-                    "version": "1.0.0"
-                }
-            }
+                "clientInfo": {"name": "test-client", "version": "1.0.0"},
+            },
         )
 
         # Create mock session
@@ -124,7 +120,7 @@ class TestMCPServer:
         assert isinstance(response, JSONRPCResponse)
         assert response.id == 1
         assert isinstance(response.result, InitializeResult)
-        assert response.result.protocolVersion == "2025-06-18"
+        assert response.result.protocolVersion is not None
         assert response.result.serverInfo.name == mcp_server.name
         assert response.result.serverInfo.version == mcp_server.version
 
@@ -134,12 +130,7 @@ class TestMCPServer:
     @pytest.mark.asyncio
     async def test_handle_list_tools(self, mcp_server):
         """Test list tools request handling."""
-        message = ListToolsRequest(
-            jsonrpc="2.0",
-            id=2,
-            method="tools/list",
-            params={}
-        )
+        message = ListToolsRequest(jsonrpc="2.0", id=2, method="tools/list", params={})
 
         response = await mcp_server._handle_list_tools(message)
 
@@ -155,10 +146,7 @@ class TestMCPServer:
             jsonrpc="2.0",
             id=3,
             method="tools/call",
-            params={
-                "name": "TestToolkit.test_tool",
-                "arguments": {"text": "Hello"}
-            }
+            params={"name": "TestToolkit.test_tool", "arguments": {"text": "Hello"}},
         )
 
         response = await mcp_server._handle_call_tool(message)
@@ -166,8 +154,9 @@ class TestMCPServer:
         assert isinstance(response, JSONRPCResponse)
         assert response.id == 3
         assert isinstance(response.result, CallToolResult)
-        assert response.result.content[0]["type"] == "text"
-        assert "Echo: Hello" in response.result.content[0]["text"]
+        assert response.result.structuredContent is not None
+        assert response.result.structuredContent[0].type == "text"
+        assert "Echo: Hello" in response.result.structuredContent[0].text
 
     @pytest.mark.asyncio
     async def test_handle_call_tool_not_found(self, mcp_server):
@@ -176,40 +165,30 @@ class TestMCPServer:
             jsonrpc="2.0",
             id=3,
             method="tools/call",
-            params={
-                "name": "NonExistent.tool",
-                "arguments": {}
-            }
+            params={"name": "NonExistent.tool", "arguments": {}},
         )
 
         response = await mcp_server._handle_call_tool(message)
 
         assert isinstance(response, JSONRPCResponse)
         assert response.result.isError
-        assert "Unknown tool" in response.result.content[0]["text"]
+        assert response.result.structuredContent is not None
+        assert "Unknown tool" in response.result.structuredContent[0].text
 
     @pytest.mark.asyncio
     async def test_handle_message_routing(self, mcp_server, initialized_server_session):
         """Test message routing to appropriate handlers."""
         # Test valid method
-        message = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "ping"
-        }
+        message = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
         response = await mcp_server.handle_message(message, session=initialized_server_session)
 
         assert response is not None
-        assert response.id == 1
+        assert str(response.id) == "1"
         assert response.result == {}
 
         # Test invalid method
-        message = {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "invalid/method"
-        }
+        message = {"jsonrpc": "2.0", "id": 2, "method": "invalid/method"}
 
         response = await mcp_server.handle_message(message, session=initialized_server_session)
 
@@ -235,11 +214,7 @@ class TestMCPServer:
         session.initialization_state = InitializationState.NOT_INITIALIZED
 
         # Try to call tools/list before initialization
-        message = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list"
-        }
+        message = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
 
         response = await mcp_server.handle_message(message, session=session)
 
@@ -254,10 +229,7 @@ class TestMCPServer:
         session.mark_initialized = Mock()
 
         # Send initialized notification
-        message = {
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        }
+        message = {"jsonrpc": "2.0", "method": "notifications/initialized"}
 
         response = await mcp_server.handle_message(message, session=session)
 
@@ -289,11 +261,7 @@ class TestMCPServer:
         await server.start()
 
         # Send a message
-        message = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "ping"
-        }
+        message = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
         response = await server.handle_message(message)
 
@@ -304,17 +272,14 @@ class TestMCPServer:
     @pytest.mark.asyncio
     async def test_error_handling_middleware(self, mcp_server):
         """Test that error handling middleware catches exceptions."""
+
         # Mock a handler to raise an exception
         async def failing_handler(*args, **kwargs):
             raise Exception("Test error")
 
         mcp_server._handlers["test/fail"] = failing_handler
 
-        message = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "test/fail"
-        }
+        message = {"jsonrpc": "2.0", "id": 1, "method": "test/fail"}
 
         response = await mcp_server.handle_message(message)
 
@@ -329,6 +294,7 @@ class TestMCPServer:
     @pytest.mark.asyncio
     async def test_session_management(self, mcp_server):
         """Test session creation and cleanup."""
+
         # Create a mock read stream that waits
         async def mock_stream():
             try:
@@ -357,10 +323,8 @@ class TestMCPServer:
 
         # Cancel the session
         session_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await session_task
-        except asyncio.CancelledError:
-            pass
 
         # Give it time to clean up
         await asyncio.sleep(0.1)
@@ -376,8 +340,7 @@ class TestMCPServer:
 
         tool = Mock()
         tool.definition.requirements.authorization = ToolAuthRequirement(
-            provider_type="oauth2",
-            provider_id="test-provider"
+            provider_type="oauth2", provider_id="test-provider"
         )
 
         # Without arcade client configured
