@@ -38,5 +38,3 @@ serve-docs: ## Serve docs locally
 .PHONY: deploy-docs
 deploy-docs: ## Deploy docs to GitHub Pages
 	uv run mkdocs gh-deploy --force --verbose
-
-

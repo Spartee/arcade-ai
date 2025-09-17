@@ -11,9 +11,9 @@ from typing import TypedDict
 from arcade_core.catalog import MaterializedTool, ToolCatalog
 
 from arcade_mcp.convert import build_input_schema_from_definition
+from arcade_mcp.exceptions import NotFoundError
 from arcade_mcp.managers.base import ComponentManager
 from arcade_mcp.types import MCPTool
-from arcade_mcp.exceptions import NotFoundError
 
 
 class ManagedTool(TypedDict):

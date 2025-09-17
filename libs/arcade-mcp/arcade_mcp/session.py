@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Any
 
 from arcade_mcp.context import Context
-from arcade_mcp.exceptions import ProtocolError, SessionError
+from arcade_mcp.exceptions import SessionError
 from arcade_mcp.types import (
     CancelledNotification,
     CancelledParams,
@@ -200,7 +200,9 @@ class NotificationManager:
     def __init__(self, server: Any):
         self._server = server
 
-    async def _broadcast(self, notification: JSONRPCMessage, session_ids: list[str] | None = None) -> None:
+    async def _broadcast(
+        self, notification: JSONRPCMessage, session_ids: list[str] | None = None
+    ) -> None:
         # Do not broadcast before server is started
         if not getattr(self._server, "_started", False):
             return
@@ -208,7 +210,11 @@ class NotificationManager:
             if session_ids is None:
                 sessions = list(self._server._sessions.values())
             else:
-                sessions = [self._server._sessions.get(sid) for sid in session_ids if sid in self._server._sessions]
+                sessions = [
+                    self._server._sessions.get(sid)
+                    for sid in session_ids
+                    if sid in self._server._sessions
+                ]
         for s in sessions:
             if s is None:
                 continue

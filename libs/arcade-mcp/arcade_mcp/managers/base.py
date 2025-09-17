@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterable
-from typing import Any, Generic, TypeVar, cast
-
+from typing import Generic, TypeVar, cast
 
 K = TypeVar("K")
 V = TypeVar("V")

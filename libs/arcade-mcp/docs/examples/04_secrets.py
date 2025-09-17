@@ -12,12 +12,8 @@ Environment:
   #   API_KEY=supersecret
 """
 
-import warnings
+from arcade_tdk import Context, tool
 
-# Suppress the deprecation warning since we're using the recommended import
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=DeprecationWarning, module="arcade_tdk")
-    from arcade_tdk import Context, tool
 
 @tool(
     name="UseSecret",

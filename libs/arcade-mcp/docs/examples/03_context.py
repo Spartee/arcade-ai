@@ -17,20 +17,16 @@ Set environment variables for secrets:
     export DATABASE_URL="postgresql://localhost/mydb"
 """
 
-import warnings
 from typing import Annotated
 
-# Suppress the deprecation warning since we're using the recommended import
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=DeprecationWarning, module="arcade_tdk")
-    from arcade_tdk import Context, tool
+from arcade_tdk import Context, tool
 
 
 @tool
 async def secure_api_call(
     context: Context,
     endpoint: Annotated[str, "API endpoint to call"],
-    method: Annotated[str, "HTTP method (GET, POST, etc.)"] = "GET"
+    method: Annotated[str, "HTTP method (GET, POST, etc.)"] = "GET",
 ) -> Annotated[str, "API response or error message"]:
     """Make a secure API call using secrets from context."""
 
@@ -50,8 +46,7 @@ async def secure_api_call(
 
 @tool(requires_secrets=["DATABASE_URL"])
 async def database_info(
-    context: Context,
-    table_name: Annotated[str | None, "Specific table to check"] = None
+    context: Context, table_name: Annotated[str | None, "Specific table to check"] = None
 ) -> Annotated[str, "Database connection info"]:
     """Get database connection information from context."""
 
@@ -79,7 +74,7 @@ async def database_info(
 @tool
 async def debug_context(
     context: Context,
-    show_secrets: Annotated[bool, "Whether to show secret keys (not values)"] = False
+    show_secrets: Annotated[bool, "Whether to show secret keys (not values)"] = False,
 ) -> Annotated[dict, "Current context information"]:
     """Debug tool to inspect the current context."""
 
@@ -92,9 +87,7 @@ async def debug_context(
         info["secret_keys"] = [s.key for s in (context.secrets or [])]
 
     # Log that debug info was accessed
-    await context.log.info(
-        f"Debug context accessed by {context.user_id or 'unknown'}"
-    )
+    await context.log.info(f"Debug context accessed by {context.user_id or 'unknown'}")
 
     return info
 
@@ -103,7 +96,7 @@ async def debug_context(
 async def process_with_progress(
     context: Context,
     items: Annotated[list[str], "Items to process"],
-    delay_seconds: Annotated[float, "Delay between items"] = 0.1
+    delay_seconds: Annotated[float, "Delay between items"] = 0.1,
 ) -> Annotated[dict, "Processing results"]:
     """Process items with progress notifications."""
 
@@ -116,13 +109,12 @@ async def process_with_progress(
         try:
             # Simulate processing
             import asyncio
+
             await asyncio.sleep(delay_seconds)
 
             # Report progress (current, total, message)
             await context.progress.report(i + 1, len(items), f"Processing: {item}")
-            await context.log.debug(
-                f"Processing item {i+1}/{len(items)}: {item}"
-            )
+            await context.log.debug(f"Processing item {i + 1}/{len(items)}: {item}")
 
             results["processed"].append(item.upper())
 

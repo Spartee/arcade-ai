@@ -55,7 +55,7 @@ except Exception as e:
         "error",
         f"Operation failed: {type(e).__name__}: {str(e)}"
     )
-    
+
     # Log traceback at debug level
     await context.mcp.log(
         "debug",
@@ -73,7 +73,7 @@ for i, item in enumerate(items):
         "debug",
         f"Progress: {i+1}/{len(items)} ({(i+1)/len(items)*100:.0f}%)"
     )
-    
+
     # Process item
     process(item)
 ```

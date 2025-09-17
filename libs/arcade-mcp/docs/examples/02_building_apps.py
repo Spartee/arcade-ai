@@ -13,27 +13,22 @@ To run with stdio transport (for Claude Desktop):
 """
 
 import sys
-import warnings
 from typing import Annotated
 
 from arcade_mcp import MCPApp
-
-# Suppress the deprecation warning since we're using the recommended import
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=DeprecationWarning, module="arcade_tdk")
-    from arcade_tdk import Context
+from arcade_tdk import Context
 
 
 # Create the MCP application
 app = MCPApp(
-    name="my_mcp_server",
-    version="0.1.0",
-    instructions="Example MCP server built with MCPApp"
+    name="my_mcp_server", version="0.1.0", instructions="Example MCP server built with MCPApp"
 )
 
 
 @app.tool
-def greet(name: Annotated[str, "Name of the person to greet"]) -> Annotated[str, "Greeting message"]:
+def greet(
+    name: Annotated[str, "Name of the person to greet"],
+) -> Annotated[str, "Greeting message"]:
     """Return a friendly greeting.
 
     Parameters:

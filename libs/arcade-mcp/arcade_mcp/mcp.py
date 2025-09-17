@@ -7,7 +7,7 @@ Provides a clean, minimal API for building MCP servers with lazy initialization.
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable, Generic, Literal, TypeVar
+from typing import Any, Callable, Literal, TypeVar
 
 from arcade_core.catalog import MaterializedTool, ToolCatalog
 from arcade_tdk.tool import tool as tool_decorator
@@ -100,17 +100,17 @@ class MCPApp:
 
     # Properties (exposed below initializer)
     @property
-    def tools(self) -> "_ToolsAPI":
+    def tools(self) -> _ToolsAPI:
         """Runtime and build-time tools API: add/update/remove/list."""
         return _ToolsAPI(self)
 
     @property
-    def prompts(self) -> "_PromptsAPI":
+    def prompts(self) -> _PromptsAPI:
         """Runtime prompts API: add/remove/list."""
         return _PromptsAPI(self)
 
     @property
-    def resources(self) -> "_ResourcesAPI":
+    def resources(self) -> _ResourcesAPI:
         """Runtime resources API: add/remove/list."""
         return _ResourcesAPI(self)
 
@@ -164,6 +164,7 @@ class MCPApp:
             )
         elif transport == "stdio":
             import asyncio
+
             from arcade_mcp.__main__ import run_stdio_server
 
             asyncio.run(
@@ -213,7 +214,9 @@ class _PromptsAPI:
     def __init__(self, app: MCPApp) -> None:
         self._app = app
 
-    async def add(self, prompt: Prompt, handler: Callable[[dict[str, str]], list[PromptMessage]] | None = None) -> None:
+    async def add(
+        self, prompt: Prompt, handler: Callable[[dict[str, str]], list[PromptMessage]] | None = None
+    ) -> None:
         if self._app.server is None:
             raise ServerError("No server bound to app. Set app.server to use runtime prompts API.")
         await self._app.server.prompts.add_prompt(prompt, handler)
@@ -237,15 +240,21 @@ class _ResourcesAPI:
 
     async def add(self, resource: Resource, handler: Callable[[str], Any] | None = None) -> None:
         if self._app.server is None:
-            raise ServerError("No server bound to app. Set app.server to use runtime resources API.")
+            raise ServerError(
+                "No server bound to app. Set app.server to use runtime resources API."
+            )
         await self._app.server.resources.add_resource(resource, handler)
 
     async def remove(self, uri: str) -> Resource:
         if self._app.server is None:
-            raise ServerError("No server bound to app. Set app.server to use runtime resources API.")
+            raise ServerError(
+                "No server bound to app. Set app.server to use runtime resources API."
+            )
         return await self._app.server.resources.remove_resource(uri)
 
     async def list(self) -> list[Resource]:
         if self._app.server is None:
-            raise ServerError("No server bound to app. Set app.server to use runtime resources API.")
+            raise ServerError(
+                "No server bound to app. Set app.server to use runtime resources API."
+            )
         return await self._app.server.resources.list_resources()
